@@ -135,18 +135,16 @@ Test "SGR hover button is 35 (WT parity)" ($sgrHoverButton -eq 35)
 $uses35 = $winOps -match '35.*true.*MOUSE_MOVED' -or $inputRs -match '35.*true' -or $winOps -match 'inject_mouse_combined.*35'
 Test "Code uses SGR button 35 for bare hover" $uses35
 
-# ── Test 4: Alt-screen gating check ──
-Write-Host "`n=== Test Group 4: Alt-screen gating for hover ==="
+# ── Test 4: Hover gating check ──
+Write-Host "`n=== Test Group 4: Hover gating for mouse-aware panes ==="
 
-# Hover should only be forwarded when pane is running a TUI app.
-# At a shell prompt, hover is wasteful and causes PSReadLine issues.
-# IMPORTANT: Must use is_fullscreen_tui() not raw alternate_screen() because
-# ConPTY strips DECSET 1049h so alternate_screen() is always false.
+# Hover should only be forwarded when the active pane explicitly wants mouse
+# input. In psmux this is unified behind pane_wants_mouse().
 $movedBlockInput = [regex]::Match($inputRs, '(?s)MouseEventKind::Moved\s*=>\s*\{(.+?)(?=MouseEventKind::Scroll)').Groups[1].Value
-$altGatedInput = $movedBlockInput -match 'is_fullscreen_tui|child_in_tui'
+$gatedInput = $movedBlockInput -match 'pane_wants_mouse'
 $movedBlockWinOps = [regex]::Match($winOps, '(?s)fn remote_mouse_motion\(.*?\{(.+?)(?=fn\s)').Groups[1].Value
-$altGatedWinOps = $movedBlockWinOps -match 'is_fullscreen_tui|in_tui'
-Test "Hover uses is_fullscreen_tui (not raw alternate_screen)" ($altGatedInput -and $altGatedWinOps)
+$gatedWinOps = $movedBlockWinOps -match 'pane_wants_mouse'
+Test "Hover uses pane_wants_mouse gate" ($gatedInput -and $gatedWinOps)
 
 # Verify ConPTY-awareness: must NOT use raw alternate_screen() in hover path
 $rawAltInHover = $movedBlockInput -match 'parser\.screen\(\)\.alternate_screen' -or

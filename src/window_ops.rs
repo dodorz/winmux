@@ -479,14 +479,16 @@ pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
         }
     }
 
-    // Forward left-click to child pane
+    // Forward left-click only when active pane wants mouse input.
     if !on_border {
         if let Some(area) = active_area {
             let (col, row) = pane_inner_cell_0based(area, x, y);
             let win_name = win.name.clone();
             if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-                inject_mouse_combined(active, col, row, 0, true,
-                    mouse_inject::FROM_LEFT_1ST_BUTTON_PRESSED, 0, &win_name);
+                if pane_wants_mouse(active) {
+                    inject_mouse_combined(active, col, row, 0, true,
+                        mouse_inject::FROM_LEFT_1ST_BUTTON_PRESSED, 0, &win_name);
+                }
             }
         }
     }
@@ -514,13 +516,15 @@ pub fn remote_mouse_drag(app: &mut AppState, x: u16, y: u16) {
     if let Some(d) = &app.drag {
         adjust_split_sizes(&mut win.root, d, x, y);
     } else {
-        // Forward drag to child pane
+        // Forward drag only when active pane wants mouse input.
         if let Some(area) = rects.iter().find(|(path, _)| *path == win.active_path).map(|(_, a)| *a) {
             let (col, row) = pane_inner_cell_0based(area, x, y);
             let win_name = win.name.clone();
             if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-                inject_mouse_combined(active, col, row, 32, true,
-                    mouse_inject::FROM_LEFT_1ST_BUTTON_PRESSED, mouse_inject::MOUSE_MOVED, &win_name);
+                if pane_wants_mouse(active) {
+                    inject_mouse_combined(active, col, row, 32, true,
+                        mouse_inject::FROM_LEFT_1ST_BUTTON_PRESSED, mouse_inject::MOUSE_MOVED, &win_name);
+                }
             }
         }
     }
@@ -558,13 +562,15 @@ pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
         return;
     }
 
-    // Forward mouse release to child pane
+    // Forward mouse release only when active pane wants mouse input.
     if let Some(area) = rects.iter().find(|(path, _)| *path == win.active_path).map(|(_, a)| *a) {
         let (col, row) = pane_inner_cell_0based(area, x, y);
         let win_name = win.name.clone();
         if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-            inject_mouse_combined(active, col, row, 0, false,
-                0, 0, &win_name);
+            if pane_wants_mouse(active) {
+                inject_mouse_combined(active, col, row, 0, false,
+                    0, 0, &win_name);
+            }
         }
     }
 }
@@ -578,31 +584,34 @@ pub fn remote_mouse_button(app: &mut AppState, x: u16, y: u16, button: u8, press
         let (col, row) = pane_inner_cell_0based(area, x, y);
         let win_name = win.name.clone();
         if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-            let sgr_btn = match button {
-                1 => 1u8, // middle
-                2 => 2u8, // right
-                _ => 0u8,
-            };
-            let button_state = if press {
-                match button {
-                    1 => mouse_inject::FROM_LEFT_2ND_BUTTON_PRESSED,
-                    2 => mouse_inject::RIGHTMOST_BUTTON_PRESSED,
-                    _ => 0,
-                }
-            } else {
-                0
-            };
-            inject_mouse_combined(active, col, row, sgr_btn, press,
-                button_state, 0, &win_name);
+            if pane_wants_mouse(active) {
+                let sgr_btn = match button {
+                    1 => 1u8, // middle
+                    2 => 2u8, // right
+                    _ => 0u8,
+                };
+                let button_state = if press {
+                    match button {
+                        1 => mouse_inject::FROM_LEFT_2ND_BUTTON_PRESSED,
+                        2 => mouse_inject::RIGHTMOST_BUTTON_PRESSED,
+                        _ => 0,
+                    }
+                } else {
+                    0
+                };
+                inject_mouse_combined(active, col, row, sgr_btn, press,
+                    button_state, 0, &win_name);
+            }
         }
     }
 }
 
 /// Forward bare mouse motion (hover) to the child PTY.
 ///
-/// Only forwarded when the active pane is in alternate screen mode (real TUI
-/// apps like nvim, opencode, htop).  Shell prompts (PSReadLine) are excluded
-/// because they spuriously enable mouse tracking on ConPTY.
+/// Only forwarded when the active pane explicitly wants mouse input
+/// (`pane_wants_mouse`).  Shell prompts and ClaudeCode-style inputs are
+/// excluded because they do not enable mouse tracking, and sending raw SGR
+/// motion bytes (ESC[<35;...) would appear as visible garbage.
 ///
 /// SGR button 35 = bare motion with no button held (WT parity).
 /// Windows Terminal encodes hover as WM_MOUSEMOVE -> button 3 + 0x20 = 35.
@@ -620,19 +629,19 @@ pub fn remote_mouse_motion(app: &mut AppState, x: u16, y: u16) {
     let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
     compute_rects(&win.root, app.last_window_area, &mut rects);
 
-    // Unconditionally forward hover to the active pane.
-    // SGR button 35 (bare motion) is harmless at shell prompts — PSReadLine
-    // ignores bare motion, and ReadFile-based apps never see the MOUSE_EVENT.
-    // Gating hover behind is_fullscreen_tui / screen_has_tui_content caused
-    // false negatives for apps like opencode whose cursor sits mid-screen.
+    // Forward hover only when the active pane explicitly wants mouse input.
+    // This avoids leaking raw SGR motion bytes (ESC[<35;...) into shell-style
+    // prompts such as claudecode input boxes.
     mouse_log(&format!("remote_mouse_motion: x={} y={}", x, y));
 
     if let Some(area) = rects.iter().find(|(path, _)| *path == win.active_path).map(|(_, a)| *a) {
         let (col, row) = pane_inner_cell_0based(area, x, y);
         let win_name = win.name.clone();
         if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-            inject_mouse_combined(active, col, row, 35, true,
-                0, mouse_inject::MOUSE_MOVED, &win_name);
+            if pane_wants_mouse(active) {
+                inject_mouse_combined(active, col, row, 35, true,
+                    0, mouse_inject::MOUSE_MOVED, &win_name);
+            }
         }
     }
 }

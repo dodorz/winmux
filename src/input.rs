@@ -1442,13 +1442,15 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
                 }
             }
 
-            // Forward left-click to child pane.
+            // Forward left-click only when active pane wants mouse input.
             if !on_border {
                 if let Some(area) = active_area {
                     if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-                        forward_mouse_to_pane_ex(active, area, me.column, me.row,
-                            crate::platform::mouse_inject::FROM_LEFT_1ST_BUTTON_PRESSED, 0,
-                            0, true); // SGR button 0 = left, press
+                        if crate::window_ops::pane_wants_mouse(active) {
+                            forward_mouse_to_pane_ex(active, area, me.column, me.row,
+                                crate::platform::mouse_inject::FROM_LEFT_1ST_BUTTON_PRESSED, 0,
+                                0, true); // SGR button 0 = left, press
+                        }
                     }
                 }
             }
@@ -1463,17 +1465,17 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
                 let _ = paste_clipboard_to_active(app);
                 return Ok(());
             }
-            // Use is_fullscreen_tui() — not pane_wants_mouse() — to avoid
-            // PSReadLine's spurious mouse tracking on ConPTY.
-            let child_in_alt = active_pane(&win.root, &win.active_path)
-                .map_or(false, |p| crate::window_ops::is_fullscreen_tui(p));
-            if child_in_alt {
-                // TUI app (fullscreen) — forward right-click
+            // Forward right-click only when active pane wants mouse input.
+            let wants_mouse = active_pane(&win.root, &win.active_path)
+                .map_or(false, |p| crate::window_ops::pane_wants_mouse(p));
+            if wants_mouse {
                 if let Some(area) = active_area {
                     if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-                        forward_mouse_to_pane_ex(active, area, me.column, me.row,
-                            crate::platform::mouse_inject::RIGHTMOST_BUTTON_PRESSED, 0,
-                            2, true); // SGR button 2 = right, press
+                        if crate::window_ops::pane_wants_mouse(active) {
+                            forward_mouse_to_pane_ex(active, area, me.column, me.row,
+                                crate::platform::mouse_inject::RIGHTMOST_BUTTON_PRESSED, 0,
+                                2, true); // SGR button 2 = right, press
+                        }
                     }
                 }
             } else {
@@ -1487,9 +1489,11 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
             if in_copy { return Ok(()); }
             if let Some(area) = active_area {
                 if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-                    forward_mouse_to_pane_ex(active, area, me.column, me.row,
-                        crate::platform::mouse_inject::FROM_LEFT_2ND_BUTTON_PRESSED, 0,
-                        1, true); // SGR button 1 = middle, press
+                    if crate::window_ops::pane_wants_mouse(active) {
+                        forward_mouse_to_pane_ex(active, area, me.column, me.row,
+                            crate::platform::mouse_inject::FROM_LEFT_2ND_BUTTON_PRESSED, 0,
+                            1, true); // SGR button 1 = middle, press
+                    }
                 }
             }
         }
@@ -1517,23 +1521,25 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
                 resize_all_panes(app);
             } else if let Some(area) = active_area {
                 if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-                    forward_mouse_to_pane_ex(active, area, me.column, me.row, 0, 0,
-                        0, false); // SGR button 0 = left, release
+                    if crate::window_ops::pane_wants_mouse(active) {
+                        forward_mouse_to_pane_ex(active, area, me.column, me.row, 0, 0,
+                            0, false); // SGR button 0 = left, release
+                    }
                 }
             }
         }
         MouseEventKind::Up(MouseButton::Right) => {
             if in_copy { return Ok(()); }
-            // Only forward release to child if it is a fullscreen TUI.
-            // Use is_fullscreen_tui() — not pane_wants_mouse() — to avoid
-            // PSReadLine's spurious mouse tracking on ConPTY.
-            let child_in_alt = active_pane(&win.root, &win.active_path)
-                .map_or(false, |p| crate::window_ops::is_fullscreen_tui(p));
-            if child_in_alt {
+            // Forward right-release only when active pane wants mouse input.
+            let wants_mouse = active_pane(&win.root, &win.active_path)
+                .map_or(false, |p| crate::window_ops::pane_wants_mouse(p));
+            if wants_mouse {
                 if let Some(area) = active_area {
                     if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-                        forward_mouse_to_pane_ex(active, area, me.column, me.row, 0, 0,
-                            2, false); // SGR button 2 = right, release
+                        if crate::window_ops::pane_wants_mouse(active) {
+                            forward_mouse_to_pane_ex(active, area, me.column, me.row, 0, 0,
+                                2, false); // SGR button 2 = right, release
+                        }
                     }
                 }
             }
@@ -1542,8 +1548,10 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
             if in_copy { return Ok(()); }
             if let Some(area) = active_area {
                 if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-                    forward_mouse_to_pane_ex(active, area, me.column, me.row, 0, 0,
-                        1, false); // SGR button 1 = middle, release
+                    if crate::window_ops::pane_wants_mouse(active) {
+                        forward_mouse_to_pane_ex(active, area, me.column, me.row, 0, 0,
+                            1, false); // SGR button 1 = middle, release
+                    }
                 }
             }
         }
@@ -1573,14 +1581,12 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
             } else {
                 // tmux parity #62: drag from normal mode enters copy mode
                 // and starts selection (when child doesn't want mouse).
-                // Use is_fullscreen_tui() — not pane_wants_mouse() — to
-                // avoid PSReadLine's spurious mouse tracking on ConPTY.
-                let child_in_alt = {
+                let wants_mouse = {
                     let win2 = &app.windows[app.active_idx];
                     active_pane(&win2.root, &win2.active_path)
-                        .map_or(false, |p| crate::window_ops::is_fullscreen_tui(p))
+                        .map_or(false, |p| crate::window_ops::pane_wants_mouse(p))
                 };
-                if child_in_alt {
+                if wants_mouse {
                     if let Some(area) = active_area {
                         let win2 = &mut app.windows[app.active_idx];
                         if let Some(active) = active_pane_mut(&mut win2.root, &win2.active_path) {
@@ -1604,14 +1610,9 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
             }
         }
         MouseEventKind::Moved => {
-            // Forward bare mouse motion (hover) to child PTY when the
-            // active pane is running a fullscreen TUI app (opencode, nvim,
-            // htop).  Shell prompts are excluded -- PSReadLine spuriously
-            // enables mouse tracking on ConPTY.
-            // SGR button 35 = bare motion with no button held (WT parity).
-            //
-            // Unconditionally forward bare motion to the active pane.
-            // SGR button 35 is harmless at shell prompts.
+            // Forward bare mouse motion (hover) only when active pane
+            // explicitly wants mouse input. This avoids sending raw
+            // SGR motion bytes (ESC[<35;...) to shell-like prompts.
             if app.last_hover_pos == Some((me.column, me.row)) {
                 return Ok(());
             }
@@ -1619,9 +1620,11 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
 
             if let Some(area) = active_area {
                 if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-                    forward_mouse_to_pane_ex(active, area, me.column, me.row,
-                        0, crate::platform::mouse_inject::MOUSE_MOVED,
-                        35, true);
+                    if crate::window_ops::pane_wants_mouse(active) {
+                        forward_mouse_to_pane_ex(active, area, me.column, me.row,
+                            0, crate::platform::mouse_inject::MOUSE_MOVED,
+                            35, true);
+                    }
                 }
             }
         }
