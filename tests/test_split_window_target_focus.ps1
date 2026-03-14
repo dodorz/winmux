@@ -103,7 +103,9 @@ psmux new-session -d -s stress -x 200 -y 50
 Start-Sleep -Milliseconds 1500
 
 for ($i = 1; $i -le 5; $i++) {
-    psmux split-window -v -t stress
+    # Alternate h/v splits to avoid running out of space in one dimension
+    if ($i % 2 -eq 1) { $dir = "-h" } else { $dir = "-v" }
+    psmux split-window $dir -t stress
     Start-Sleep -Milliseconds 1000
     $result = psmux display-message -t stress -p '#{pane_index}'
     Test-Check "Stress split ${i}: focus on pane ${i}" "$i" $result
