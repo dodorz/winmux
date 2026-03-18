@@ -392,6 +392,8 @@ match cmd {
     }
     "zoom-pane" | "resize-pane" | "resizep" if args.iter().any(|a| *a == "-Z") => { let _ = tx.send(CtrlReq::ZoomPane); }
     "zoom-pane" => { let _ = tx.send(CtrlReq::ZoomPane); }
+    "prefix-begin" => { let _ = tx.send(CtrlReq::PrefixBegin); }
+    "prefix-end" => { let _ = tx.send(CtrlReq::PrefixEnd); }
     "copy-enter" => { let _ = tx.send(CtrlReq::CopyEnter); }
     "copy-move" => {
         if args.len() >= 2 { if let (Ok(dx), Ok(dy)) = (args[0].parse::<i16>(), args[1].parse::<i16>()) { let _ = tx.send(CtrlReq::CopyMove(dx, dy)); } }

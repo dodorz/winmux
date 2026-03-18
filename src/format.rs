@@ -1367,15 +1367,18 @@ pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
         "client_session" | "client_last_session" => app.session_name.clone(),
         "client_name" | "client_tty" => "client0".into(),
         "client_pid" => std::process::id().to_string(),
-        "client_prefix" => match app.mode { Mode::Prefix { .. } => "1".into(), _ => "0".into() },
+        "client_prefix" => if app.client_prefix_active || matches!(app.mode, Mode::Prefix { .. }) { "1".into() } else { "0".into() },
         "client_activity" | "client_created" => app.created_at.timestamp().to_string(),
         "client_activity_string" | "client_created_string" => app.created_at.format("%a %b %e %H:%M:%S %Y").to_string(),
         "client_control_mode" => "0".into(),
         "client_flags" => "focused".into(),
-        "client_key_table" => match app.mode {
-            Mode::Prefix { .. } => "prefix".into(),
-            Mode::CopyMode => "copy-mode-vi".into(),
-            _ => "root".into(),
+        "client_key_table" => if app.client_prefix_active || matches!(app.mode, Mode::Prefix { .. }) {
+            "prefix".into()
+        } else {
+            match app.mode {
+                Mode::CopyMode => "copy-mode-vi".into(),
+                _ => "root".into(),
+            }
         },
         "client_termname" | "client_termtype" => env::var("TERM").unwrap_or_else(|_| "xterm-256color".into()),
         "client_termfeatures" => "256,RGB,title".into(),

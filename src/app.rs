@@ -1150,6 +1150,8 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                 CtrlReq::SendKey(k) => { send_key_to_active(&mut app, &k)?; }
                 CtrlReq::SendPaste(s) => { send_paste_to_active(&mut app, &s)?; }
                 CtrlReq::ZoomPane => { toggle_zoom(&mut app); }
+                CtrlReq::PrefixBegin => { app.client_prefix_active = true; }
+                CtrlReq::PrefixEnd => { app.client_prefix_active = false; }
                 CtrlReq::CopyEnter => { enter_copy_mode(&mut app); }
                 CtrlReq::CopyMove(dx, dy) => { move_copy_cursor(&mut app, dx, dy); }
                 CtrlReq::CopyAnchor => { if let Some((r,c)) = current_prompt_pos(&mut app) { app.copy_anchor = Some((r,c)); app.copy_pos = Some((r,c)); } }

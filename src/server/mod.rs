@@ -954,6 +954,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::ClientDetach(cid) => {
                     app.attached_clients = app.attached_clients.saturating_sub(1);
                     app.client_sizes.remove(&cid);
+                    app.client_prefix_active = false;
                     if app.latest_client_id == Some(cid) {
                         app.latest_client_id = None;
                     }
@@ -1137,6 +1138,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::SendKey(k) => { app.status_message = None; send_key_to_active(&mut app, &k)?; echo_pending_until = Some(Instant::now()); }
                 CtrlReq::SendPaste(s) => { send_paste_to_active(&mut app, &s)?; echo_pending_until = Some(Instant::now()); }
                 CtrlReq::ZoomPane => { toggle_zoom(&mut app); state_dirty = true; hook_event = Some("after-resize-pane"); }
+                CtrlReq::PrefixBegin => { app.client_prefix_active = true; state_dirty = true; }
+                CtrlReq::PrefixEnd => { app.client_prefix_active = false; state_dirty = true; }
                 CtrlReq::CopyEnter => { enter_copy_mode(&mut app); }
                 CtrlReq::CopyEnterPageUp => {
                     enter_copy_mode(&mut app);

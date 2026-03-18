@@ -879,6 +879,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         {
                             prefix_armed = false;
                             prefix_repeating = false;
+                            cmd_batch.push("prefix-end\n".into());
                         }
 
                         // Overlay Esc must be checked BEFORE selection-Esc so that
@@ -1012,7 +1013,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                             rsel_end = None;
                             selection_changed = true;
                         }
-                        else if is_prefix { prefix_armed = true; prefix_armed_at = Instant::now(); prefix_repeating = false; }
+                        else if is_prefix { prefix_armed = true; prefix_armed_at = Instant::now(); prefix_repeating = false; cmd_batch.push("prefix-begin\n".into()); }
                         // Check root-table bindings (bind-key -n / bind-key -T root)
                         // These fire without prefix, before keys are forwarded to PTY
                         else if !command_input && !renaming && !pane_renaming && !chooser && !tree_chooser && !session_chooser && !keys_viewer && confirm_cmd.is_none() && {
@@ -1326,6 +1327,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                             } else {
                                 prefix_armed = false;
                                 prefix_repeating = false;
+                                cmd_batch.push("prefix-end\n".into());
                             }
                         } else {
                             match key.code {

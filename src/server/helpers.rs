@@ -114,6 +114,11 @@ pub(crate) fn combined_data_version(app: &AppState) -> u64 {
     if app.zoom_saved.is_some() {
         v = v.wrapping_add(0x8000_0000_0000);
     }
+    // Include client prefix state so the status bar re-renders
+    // immediately when the prefix key is pressed/released (issue #126).
+    if app.client_prefix_active {
+        v = v.wrapping_add(0x4000_0000_0000);
+    }
     v
 }
 

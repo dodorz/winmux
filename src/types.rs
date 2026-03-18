@@ -293,6 +293,8 @@ pub struct AppState {
     pub next_win_id: usize,
     pub next_pane_id: usize,
     pub zoom_saved: Option<Vec<(Vec<usize>, Vec<u16>)>>,
+    /// Whether the attached client is currently in prefix mode (for `client_prefix` format var).
+    pub client_prefix_active: bool,
     pub sync_input: bool,
     /// Hooks: map of hook name to list of commands
     pub hooks: std::collections::HashMap<String, Vec<String>>,
@@ -514,6 +516,7 @@ impl AppState {
             next_win_id: 1,
             next_pane_id: 1,
             zoom_saved: None,
+            client_prefix_active: false,
             sync_input: false,
             hooks: std::collections::HashMap::new(),
             wait_channels: std::collections::HashMap::new(),
@@ -669,6 +672,8 @@ pub enum CtrlReq {
     SendKey(String),
     SendPaste(String),
     ZoomPane,
+    PrefixBegin,
+    PrefixEnd,
     CopyEnter,
     CopyEnterPageUp,
     CopyMove(i16, i16),
