@@ -302,8 +302,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     let mut pane_title_buf = String::new();
     let mut command_input = false;
     let mut command_buf = String::new();
-    let mut chooser = false;
-    let mut choices: Vec<(usize, usize)> = Vec::new();
+
     let mut tree_chooser = false;
     let mut tree_entries: Vec<(bool, usize, usize, String, String)> = Vec::new();  // (is_win, id, sub_id, label, session_name)
     let mut tree_selected: usize = 0;
@@ -1002,11 +1001,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 _ => { cmd_batch.push("overlay-close\n".into()); }
                             }
                         }
-                        else if matches!(key.code, KeyCode::Esc) && (command_input || renaming || pane_renaming || chooser || tree_chooser || session_chooser || confirm_cmd.is_some() || keys_viewer) {
+                        else if matches!(key.code, KeyCode::Esc) && (command_input || renaming || pane_renaming || tree_chooser || session_chooser || confirm_cmd.is_some() || keys_viewer) {
                             command_input = false;
                             renaming = false;
                             pane_renaming = false;
-                            chooser = false;
                             tree_chooser = false;
                             session_chooser = false;
                             keys_viewer = false;
@@ -1025,7 +1023,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         else if is_prefix { prefix_armed = true; prefix_armed_at = Instant::now(); prefix_repeating = false; cmd_batch.push("prefix-begin\n".into()); }
                         // Check root-table bindings (bind-key -n / bind-key -T root)
                         // These fire without prefix, before keys are forwarded to PTY
-                        else if !command_input && !renaming && !pane_renaming && !chooser && !tree_chooser && !session_chooser && !keys_viewer && confirm_cmd.is_none() && {
+                        else if !command_input && !renaming && !pane_renaming && !tree_chooser && !session_chooser && !keys_viewer && confirm_cmd.is_none() && {
                             let key_tuple = normalize_key_for_binding((key.code, key.modifiers));
                             synced_bindings.iter().any(|b| b.t == "root" && parse_key_string(&b.k).map_or(false, |k| normalize_key_for_binding(k) == key_tuple))
                         } {
@@ -1266,7 +1264,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                         if sname == &current_session { session_selected = i; break; }
                                     }
                                 }
-                                KeyCode::Char('q') => { chooser = true; }
+                                KeyCode::Char('q') => { cmd_batch.push("display-panes\n".into()); }
                                 KeyCode::Char('v') => { cmd_batch.push("rectangle-toggle\n".into()); }
                                 KeyCode::Char('y') => { cmd_batch.push("copy-yank\n".into()); }
                                 // Session navigation (like tmux prefix+( and prefix+))
@@ -1464,15 +1462,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 KeyCode::Esc if renaming => { renaming = false; session_renaming = false; }
                                 KeyCode::Esc if pane_renaming => { pane_renaming = false; }
                                 KeyCode::Esc if command_input => { command_input = false; }
-                                KeyCode::Char(d) if chooser && d.is_ascii_digit() => {
-                                    let raw = d.to_digit(10).unwrap() as usize;
-                                    let choice = if raw == 0 { 10 } else { raw };
-                                    if let Some((_, pid)) = choices.iter().find(|(n, _)| *n == choice) {
-                                        cmd_batch.push(format!("focus-pane {}\n", pid));
-                                        chooser = false;
-                                    }
-                                }
-                                KeyCode::Esc if chooser => { chooser = false; }
+
                                 KeyCode::Char(' ') => {
                                     #[cfg(windows)]
                                     {
@@ -1876,7 +1866,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         // Rate-limit dump-state requests to avoid flooding the server.
         // dump_in_flight prevents >1 concurrent request; the interval check
         // ensures we don't re-request faster than ~100fps when typing.
-        let overlays_active = command_input || renaming || pane_renaming || chooser || tree_chooser || session_chooser || keys_viewer || confirm_cmd.is_some() || srv_popup_active || srv_confirm_active || srv_menu_active || srv_display_panes || clock_active;
+        let overlays_active = command_input || renaming || pane_renaming || tree_chooser || session_chooser || keys_viewer || confirm_cmd.is_some() || srv_popup_active || srv_confirm_active || srv_menu_active || srv_display_panes || clock_active;
         let should_dump = if force_dump || size_changed {
             true
         } else if typing_active {
@@ -2617,48 +2607,6 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         let ind_rect = Rect::new(ind_x, ind_y, ind_len, 1);
                         let ind_para = Paragraph::new(Span::styled(indicator, Style::default().fg(Color::DarkGray)));
                         f.render_widget(ind_para, ind_rect);
-                    }
-                }
-            }
-            if chooser {
-                let mut rects: Vec<(usize, Rect)> = Vec::new();
-                fn rec(node: &LayoutJson, area: Rect, out: &mut Vec<(usize, Rect)>) {
-                    match node {
-                        LayoutJson::Leaf { id, .. } => { out.push((*id, area)); }
-                        LayoutJson::Split { kind, sizes, children } => {
-                            let effective_sizes: Vec<u16> = if sizes.len() == children.len() {
-                                sizes.clone()
-                            } else {
-                                vec![(100 / children.len().max(1)) as u16; children.len()]
-                            };
-                            let is_horizontal = kind == "Horizontal";
-                            let rects = split_with_gaps(is_horizontal, &effective_sizes, area);
-                            for (i, child) in children.iter().enumerate() {
-                                if i < rects.len() { rec(child, rects[i], out); }
-                            }
-                        }
-                    }
-                }
-                rec(&root, content_chunk, &mut rects);
-                choices.clear();
-                for (i, (pid, r)) in rects.iter().enumerate() {
-                    if i < 10 {
-                        choices.push((i + 1, *pid));
-                        let bw = 7u16; let bh = 3u16;
-                        let bx = r.x + r.width.saturating_sub(bw) / 2;
-                        let by = r.y + r.height.saturating_sub(bh) / 2;
-                        let b = Rect { x: bx, y: by, width: bw, height: bh };
-                        let pane_sel_style = crate::rendering::parse_tmux_style(&mode_style_str);
-                        let block = Block::default().borders(Borders::ALL).style(pane_sel_style);
-                        let inner = block.inner(b);
-                        let disp = if i + 1 == 10 { 0 } else { i + 1 };
-                        let para = Paragraph::new(Line::from(Span::styled(
-                            format!(" {} ", disp),
-                            pane_sel_style.add_modifier(Modifier::BOLD),
-                        ))).alignment(Alignment::Center);
-                        f.render_widget(Clear, b);
-                        f.render_widget(block, b);
-                        f.render_widget(para, inner);
                     }
                 }
             }
