@@ -9,7 +9,7 @@ use ratatui::widgets::*;
 
 use crate::layout::LayoutJson;
 use crate::help;
-use crate::util::{WinTree, base64_encode};
+use crate::util::{WinTree, base64_encode, quote_arg};
 use crate::session::read_session_key;
 use crate::rendering::{dim_predictions_enabled, map_color, dim_color, centered_rect, fix_border_intersections};
 use crate::style::parse_tmux_style_components;
@@ -1444,14 +1444,14 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 KeyCode::Backspace if command_input => { let _ = command_buf.pop(); }
                                 KeyCode::Enter if renaming => {
                                     if session_renaming {
-                                        cmd_batch.push(format!("rename-session {}\n", rename_buf));
+                                        cmd_batch.push(format!("rename-session {}\n", quote_arg(&rename_buf)));
                                         session_renaming = false;
                                     } else {
-                                        cmd_batch.push(format!("rename-window {}\n", rename_buf));
+                                        cmd_batch.push(format!("rename-window {}\n", quote_arg(&rename_buf)));
                                     }
                                     renaming = false;
                                 }
-                                KeyCode::Enter if pane_renaming => { cmd_batch.push(format!("set-pane-title {}\n", pane_title_buf)); pane_renaming = false; }
+                                KeyCode::Enter if pane_renaming => { cmd_batch.push(format!("set-pane-title {}\n", quote_arg(&pane_title_buf))); pane_renaming = false; }
                                 KeyCode::Enter if command_input => {
                                     let trimmed = command_buf.trim().to_string();
                                     if !trimmed.is_empty() {

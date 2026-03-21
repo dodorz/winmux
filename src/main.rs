@@ -554,9 +554,9 @@ fn run_main() -> io::Result<()> {
                                             .ok()
                                             .and_then(|p| p.to_str().map(|s| s.to_string()));
                                         let claim_cmd = if let Some(ref cwd) = client_cwd {
-                                            format!("claim-session {} \"{}\"\n", name, cwd.replace('"', "\\\""))
+                                            format!("claim-session {} {}\n", crate::util::quote_arg(&name), crate::util::quote_arg(cwd))
                                         } else {
-                                            format!("claim-session {}\n", name)
+                                            format!("claim-session {}\n", crate::util::quote_arg(&name))
                                         };
                                         match crate::session::send_auth_cmd_response(
                                             &warm_addr, &warm_key,
@@ -567,7 +567,7 @@ fn run_main() -> io::Result<()> {
                                                     let new_key = crate::session::read_session_key(&port_file_base).unwrap_or_default();
                                                     let _ = crate::session::send_auth_cmd(
                                                         &warm_addr, &new_key,
-                                                        format!("rename-window {}\n", wn).as_bytes(),
+                                                        format!("rename-window {}\n", crate::util::quote_arg(wn)).as_bytes(),
                                                     );
                                                 }
                                                 true
@@ -1182,7 +1182,7 @@ fn run_main() -> io::Result<()> {
                     i += 1;
                 }
                 if let Some(name) = new_name {
-                    send_control(format!("rename-session {}\n", name))?;
+                    send_control(format!("rename-session {}\n", crate::util::quote_arg(&name)))?;
                 }
                 return Ok(());
             }
@@ -1571,7 +1571,7 @@ fn run_main() -> io::Result<()> {
                 // cmd_args[0] is the command, cmd_args[1] should be the new name
                 if let Some(name) = cmd_args.get(1) {
                     if !name.starts_with('-') {
-                        send_control(format!("rename-window {}\n", name))?;
+                        send_control(format!("rename-window {}\n", crate::util::quote_arg(name)))?;
                     }
                 }
                 return Ok(());
@@ -1611,7 +1611,7 @@ fn run_main() -> io::Result<()> {
                         }
                     } else {
                         // Send source-file command to server if attached
-                        send_control(format!("source-file {}\n", expanded))?;
+                        send_control(format!("source-file {}\n", crate::util::quote_arg(&expanded)))?;
                     }
                 }
                 return Ok(());
