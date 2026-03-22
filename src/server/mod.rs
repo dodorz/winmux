@@ -2954,6 +2954,21 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                 }
+                CtrlReq::ShowTextPopup(title, content) => {
+                    let lines: Vec<&str> = content.lines().collect();
+                    let width = lines.iter().map(|l| l.len()).max().unwrap_or(40).max(20) as u16 + 4;
+                    let height = (lines.len() as u16 + 2).max(5).min(40);
+                    app.mode = Mode::PopupMode {
+                        command: title,
+                        output: content,
+                        process: None,
+                        width: width.min(120),
+                        height,
+                        close_on_exit: false,
+                        popup_pty: None,
+                    };
+                    state_dirty = true;
+                }
             }
             // Log any active_idx change for debugging window-switch issues
             if app.active_idx != _prev_active_idx && crate::debug_log::server_log_enabled() {

@@ -829,6 +829,9 @@ pub enum CtrlReq {
     MenuSelect(usize),
     /// Navigate menu up/down (delta: -1 = up, +1 = down)
     MenuNavigate(i32),
+    /// Show static text in a popup overlay (title, content).
+    /// Used by the persistent client command prompt for list-* commands.
+    ShowTextPopup(String, String),
 }
 
 /// Global flag set by PTY reader threads when new output arrives.

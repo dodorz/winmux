@@ -453,17 +453,35 @@ match cmd {
         if let Some(fmt_str) = fmt {
             let (rtx, rrx) = mpsc::channel::<String>();
             let _ = tx.send(CtrlReq::ListWindowsFormat(rtx, fmt_str));
-            if let Ok(text) = rrx.recv() { let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush(); }
+            if let Ok(text) = rrx.recv() {
+                if persistent {
+                    let _ = tx.send(CtrlReq::ShowTextPopup("list-windows".to_string(), text));
+                } else {
+                    let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+                }
+            }
         } else if args.iter().any(|a| *a == "-J") {
             // JSON output for programmatic use
             let (rtx, rrx) = mpsc::channel::<String>();
             let _ = tx.send(CtrlReq::ListWindows(rtx));
-            if let Ok(text) = rrx.recv() { let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush(); }
+            if let Ok(text) = rrx.recv() {
+                if persistent {
+                    let _ = tx.send(CtrlReq::ShowTextPopup("list-windows".to_string(), text));
+                } else {
+                    let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+                }
+            }
         } else {
             // tmux-compatible text output (default)
             let (rtx, rrx) = mpsc::channel::<String>();
             let _ = tx.send(CtrlReq::ListWindowsTmux(rtx));
-            if let Ok(text) = rrx.recv() { let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush(); }
+            if let Ok(text) = rrx.recv() {
+                if persistent {
+                    let _ = tx.send(CtrlReq::ShowTextPopup("list-windows".to_string(), text));
+                } else {
+                    let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+                }
+            }
         }
         if !persistent { break; }
     }
@@ -571,7 +589,13 @@ match cmd {
                 let _ = tx.send(CtrlReq::ListPanes(rtx));
             }
         }
-        if let Ok(text) = rrx.recv() { let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush(); }
+        if let Ok(text) = rrx.recv() {
+            if persistent {
+                let _ = tx.send(CtrlReq::ShowTextPopup("list-panes".to_string(), text));
+            } else {
+                let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+            }
+        }
         if !persistent { break; }
     }
     "kill-window" | "killw" => { let _ = tx.send(CtrlReq::KillWindow); }
@@ -933,7 +957,13 @@ match cmd {
     "list-clients" | "lsc" => {
         let (rtx, rrx) = mpsc::channel::<String>();
         let _ = tx.send(CtrlReq::ListClients(rtx));
-        if let Ok(text) = rrx.recv() { let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush(); }
+        if let Ok(text) = rrx.recv() {
+            if persistent {
+                let _ = tx.send(CtrlReq::ShowTextPopup("list-clients".to_string(), text));
+            } else {
+                let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+            }
+        }
         if !persistent { break; }
     }
     "switch-client" | "switchc" => {
@@ -1003,7 +1033,13 @@ match cmd {
     "show-hooks" => {
         let (rtx, rrx) = mpsc::channel::<String>();
         let _ = tx.send(CtrlReq::ShowHooks(rtx));
-        if let Ok(text) = rrx.recv() { let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush(); }
+        if let Ok(text) = rrx.recv() {
+            if persistent {
+                let _ = tx.send(CtrlReq::ShowTextPopup("show-hooks".to_string(), text));
+            } else {
+                let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+            }
+        }
         if !persistent { break; }
     }
     "wait-for" => {
@@ -1252,8 +1288,12 @@ match cmd {
     }
     "list-commands" | "lscm" => {
         let cmds = TMUX_COMMANDS.join("\n");
-        let _ = write!(write_stream, "{}\n", cmds);
-        let _ = write_stream.flush();
+        if persistent {
+            let _ = tx.send(CtrlReq::ShowTextPopup("list-commands".to_string(), cmds));
+        } else {
+            let _ = write!(write_stream, "{}\n", cmds);
+            let _ = write_stream.flush();
+        }
         if !persistent { break; }
     }
     "server-info" | "info" => {
