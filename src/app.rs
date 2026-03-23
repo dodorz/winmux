@@ -735,7 +735,7 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
             }
 
             // Render Popup mode
-            if let Mode::PopupMode { command, output, width, height, ref popup_pty, .. } = &app.mode {
+            if let Mode::PopupMode { command, output, width, height, ref popup_pty, scroll_offset, .. } = &app.mode {
                 let w = (*width).min(area.width.saturating_sub(4));
                 let h = (*height).min(area.height.saturating_sub(4));
                 let popup_area = Rect {
@@ -808,7 +808,8 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                 };
                 
                 let para = Paragraph::new(content)
-                    .block(block);
+                    .block(block)
+                    .scroll((*scroll_offset, 0));
                 
                 f.render_widget(Clear, popup_area);
                 f.render_widget(para, popup_area);

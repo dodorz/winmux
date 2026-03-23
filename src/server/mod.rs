@@ -99,6 +99,7 @@ fn serialize_overlay_json(app: &AppState) -> String {
                 }
             }
             out.push(']');
+            out.push_str(if popup_pty.is_some() { ",\"popup_has_pty\":true" } else { ",\"popup_has_pty\":false" });
         }
         Mode::ConfirmMode { prompt, .. } => {
             out.push_str(",\"confirm_active\":true,\"confirm_prompt\":\"");
@@ -2728,6 +2729,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             height,
                             close_on_exit,
                             popup_pty: pty_result,
+                            scroll_offset: 0,
                         };
                         state_dirty = true;
                     } else {
@@ -2739,6 +2741,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             height,
                             close_on_exit: true,
                             popup_pty: None,
+                            scroll_offset: 0,
                         };
                         state_dirty = true;
                     }
@@ -2957,7 +2960,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::ShowTextPopup(title, content) => {
                     let lines: Vec<&str> = content.lines().collect();
                     let width = lines.iter().map(|l| l.len()).max().unwrap_or(40).max(20) as u16 + 4;
-                    let height = (lines.len() as u16 + 2).max(5).min(40);
+                    let height = (lines.len() as u16 + 2).max(5);
                     app.mode = Mode::PopupMode {
                         command: title,
                         output: content,
@@ -2966,6 +2969,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         height,
                         close_on_exit: false,
                         popup_pty: None,
+                        scroll_offset: 0,
                     };
                     state_dirty = true;
                 }

@@ -389,6 +389,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     #[allow(unused_assignments)]
     let mut srv_popup_lines: Vec<String> = Vec::new();
     #[allow(unused_assignments)]
+    let mut srv_popup_has_pty = false;
+    let mut srv_popup_scroll: u16 = 0;
+    #[allow(unused_assignments)]
     let mut srv_confirm_active = false;
     #[allow(unused_assignments)]
     let mut srv_confirm_prompt = String::new();
@@ -538,6 +541,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         popup_height: Option<u16>,
         #[serde(default)]
         popup_lines: Vec<String>,
+        #[serde(default)]
+        popup_has_pty: bool,
         /// Confirm overlay active
         #[serde(default)]
         confirm_active: bool,
@@ -898,68 +903,101 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         // When a server overlay is active, intercept ALL keys and
                         // forward them to the server via overlay-specific commands.
                         if srv_popup_active {
-                            match key.code {
-                                KeyCode::Esc => { cmd_batch.push("overlay-close\n".into()); }
-                                KeyCode::Char(c) => {
-                                    let bytes = if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
-                                        vec![(c as u8) & 0x1F]
-                                    } else {
-                                        let mut buf = [0u8; 4];
-                                        let s = c.encode_utf8(&mut buf);
-                                        s.as_bytes().to_vec()
-                                    };
-                                    let encoded = crate::util::base64_encode(std::str::from_utf8(&bytes).unwrap_or(""));
-                                    cmd_batch.push(format!("popup-input {}\n", encoded));
+                            if srv_popup_has_pty {
+                                // PTY popup: forward all keys to server
+                                match key.code {
+                                    KeyCode::Esc => { cmd_batch.push("overlay-close\n".into()); }
+                                    KeyCode::Char(c) => {
+                                        let bytes = if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+                                            vec![(c as u8) & 0x1F]
+                                        } else {
+                                            let mut buf = [0u8; 4];
+                                            let s = c.encode_utf8(&mut buf);
+                                            s.as_bytes().to_vec()
+                                        };
+                                        let encoded = crate::util::base64_encode(std::str::from_utf8(&bytes).unwrap_or(""));
+                                        cmd_batch.push(format!("popup-input {}\n", encoded));
+                                    }
+                                    KeyCode::Enter => {
+                                        let encoded = crate::util::base64_encode("\r");
+                                        cmd_batch.push(format!("popup-input {}\n", encoded));
+                                    }
+                                    KeyCode::Backspace => {
+                                        let encoded = crate::util::base64_encode("\x7f");
+                                        cmd_batch.push(format!("popup-input {}\n", encoded));
+                                    }
+                                    KeyCode::Tab => {
+                                        let encoded = crate::util::base64_encode("\t");
+                                        cmd_batch.push(format!("popup-input {}\n", encoded));
+                                    }
+                                    KeyCode::Up => {
+                                        let encoded = crate::util::base64_encode("\x1b[A");
+                                        cmd_batch.push(format!("popup-input {}\n", encoded));
+                                    }
+                                    KeyCode::Down => {
+                                        let encoded = crate::util::base64_encode("\x1b[B");
+                                        cmd_batch.push(format!("popup-input {}\n", encoded));
+                                    }
+                                    KeyCode::Right => {
+                                        let encoded = crate::util::base64_encode("\x1b[C");
+                                        cmd_batch.push(format!("popup-input {}\n", encoded));
+                                    }
+                                    KeyCode::Left => {
+                                        let encoded = crate::util::base64_encode("\x1b[D");
+                                        cmd_batch.push(format!("popup-input {}\n", encoded));
+                                    }
+                                    KeyCode::Home => {
+                                        let encoded = crate::util::base64_encode("\x1b[H");
+                                        cmd_batch.push(format!("popup-input {}\n", encoded));
+                                    }
+                                    KeyCode::End => {
+                                        let encoded = crate::util::base64_encode("\x1b[F");
+                                        cmd_batch.push(format!("popup-input {}\n", encoded));
+                                    }
+                                    KeyCode::PageUp => {
+                                        let encoded = crate::util::base64_encode("\x1b[5~");
+                                        cmd_batch.push(format!("popup-input {}\n", encoded));
+                                    }
+                                    KeyCode::PageDown => {
+                                        let encoded = crate::util::base64_encode("\x1b[6~");
+                                        cmd_batch.push(format!("popup-input {}\n", encoded));
+                                    }
+                                    KeyCode::Delete => {
+                                        let encoded = crate::util::base64_encode("\x1b[3~");
+                                        cmd_batch.push(format!("popup-input {}\n", encoded));
+                                    }
+                                    _ => {}
                                 }
-                                KeyCode::Enter => {
-                                    let encoded = crate::util::base64_encode("\r");
-                                    cmd_batch.push(format!("popup-input {}\n", encoded));
+                            } else {
+                                // Static (non-PTY) popup: handle scroll locally, q/Esc close
+                                let total_lines = srv_popup_lines.len() as u16;
+                                match key.code {
+                                    KeyCode::Esc | KeyCode::Char('q') => {
+                                        cmd_batch.push("overlay-close\n".into());
+                                        srv_popup_scroll = 0;
+                                    }
+                                    KeyCode::Up | KeyCode::Char('k') => {
+                                        srv_popup_scroll = srv_popup_scroll.saturating_sub(1);
+                                    }
+                                    KeyCode::Down | KeyCode::Char('j') => {
+                                        if srv_popup_scroll < total_lines.saturating_sub(1) {
+                                            srv_popup_scroll += 1;
+                                        }
+                                    }
+                                    KeyCode::PageUp => {
+                                        srv_popup_scroll = srv_popup_scroll.saturating_sub(10);
+                                    }
+                                    KeyCode::PageDown => {
+                                        srv_popup_scroll = (srv_popup_scroll + 10).min(total_lines.saturating_sub(1));
+                                    }
+                                    KeyCode::Home | KeyCode::Char('g') => {
+                                        srv_popup_scroll = 0;
+                                    }
+                                    KeyCode::End | KeyCode::Char('G') => {
+                                        srv_popup_scroll = total_lines.saturating_sub(1);
+                                    }
+                                    _ => {}
                                 }
-                                KeyCode::Backspace => {
-                                    let encoded = crate::util::base64_encode("\x7f");
-                                    cmd_batch.push(format!("popup-input {}\n", encoded));
-                                }
-                                KeyCode::Tab => {
-                                    let encoded = crate::util::base64_encode("\t");
-                                    cmd_batch.push(format!("popup-input {}\n", encoded));
-                                }
-                                KeyCode::Up => {
-                                    let encoded = crate::util::base64_encode("\x1b[A");
-                                    cmd_batch.push(format!("popup-input {}\n", encoded));
-                                }
-                                KeyCode::Down => {
-                                    let encoded = crate::util::base64_encode("\x1b[B");
-                                    cmd_batch.push(format!("popup-input {}\n", encoded));
-                                }
-                                KeyCode::Right => {
-                                    let encoded = crate::util::base64_encode("\x1b[C");
-                                    cmd_batch.push(format!("popup-input {}\n", encoded));
-                                }
-                                KeyCode::Left => {
-                                    let encoded = crate::util::base64_encode("\x1b[D");
-                                    cmd_batch.push(format!("popup-input {}\n", encoded));
-                                }
-                                KeyCode::Home => {
-                                    let encoded = crate::util::base64_encode("\x1b[H");
-                                    cmd_batch.push(format!("popup-input {}\n", encoded));
-                                }
-                                KeyCode::End => {
-                                    let encoded = crate::util::base64_encode("\x1b[F");
-                                    cmd_batch.push(format!("popup-input {}\n", encoded));
-                                }
-                                KeyCode::PageUp => {
-                                    let encoded = crate::util::base64_encode("\x1b[5~");
-                                    cmd_batch.push(format!("popup-input {}\n", encoded));
-                                }
-                                KeyCode::PageDown => {
-                                    let encoded = crate::util::base64_encode("\x1b[6~");
-                                    cmd_batch.push(format!("popup-input {}\n", encoded));
-                                }
-                                KeyCode::Delete => {
-                                    let encoded = crate::util::base64_encode("\x1b[3~");
-                                    cmd_batch.push(format!("popup-input {}\n", encoded));
-                                }
-                                _ => {}
                             }
                         }
                         else if srv_confirm_active {
@@ -1929,6 +1967,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         srv_popup_width = state.popup_width.unwrap_or(80);
         srv_popup_height = state.popup_height.unwrap_or(24);
         srv_popup_lines = state.popup_lines;
+        let new_popup_has_pty = state.popup_has_pty;
+        if !srv_popup_active || new_popup_has_pty != srv_popup_has_pty {
+            srv_popup_scroll = 0;
+        }
+        srv_popup_has_pty = new_popup_has_pty;
         srv_confirm_active = state.confirm_active;
         srv_confirm_prompt = state.confirm_prompt.unwrap_or_default();
         srv_menu_active = state.menu_active;
@@ -2826,7 +2869,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 for line_str in &srv_popup_lines {
                     lines.push(Line::from(line_str.clone()));
                 }
-                let para = Paragraph::new(Text::from(lines)).block(block);
+                let para = Paragraph::new(Text::from(lines)).block(block).scroll((srv_popup_scroll, 0));
                 f.render_widget(Clear, popup_area);
                 f.render_widget(para, popup_area);
             }

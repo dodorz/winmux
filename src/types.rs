@@ -185,6 +185,8 @@ pub enum Mode {
         close_on_exit: bool,
         /// Optional: interactive PTY for the popup (fzf, etc.)  
         popup_pty: Option<PopupPty>,
+        /// Scroll offset for static text popups (lines from top)
+        scroll_offset: u16,
     },
     /// Confirmation prompt before command
     ConfirmMode { 

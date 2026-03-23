@@ -859,7 +859,7 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
             }
             Ok(false)
         }
-        Mode::PopupMode { ref mut output, ref mut process, close_on_exit, ref mut popup_pty, .. } => {
+        Mode::PopupMode { ref mut output, ref mut process, close_on_exit, ref mut popup_pty, ref mut scroll_offset, .. } => {
             let mut should_close = false;
             let mut exit_status: Option<std::process::ExitStatus> = None;
             
@@ -908,6 +908,7 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 }
             } else {
                 // Non-PTY popup (static output)
+                let total_lines = output.lines().count() as u16;
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => {
                         if let Some(ref mut proc) = process {
@@ -915,11 +916,25 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                         }
                         should_close = true;
                     }
-                    KeyCode::Char(c) => {
-                        output.push(c);
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        *scroll_offset = scroll_offset.saturating_sub(1);
                     }
-                    KeyCode::Enter => {
-                        output.push('\n');
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if *scroll_offset < total_lines.saturating_sub(1) {
+                            *scroll_offset += 1;
+                        }
+                    }
+                    KeyCode::PageUp => {
+                        *scroll_offset = scroll_offset.saturating_sub(10);
+                    }
+                    KeyCode::PageDown => {
+                        *scroll_offset = (*scroll_offset + 10).min(total_lines.saturating_sub(1));
+                    }
+                    KeyCode::Home | KeyCode::Char('g') => {
+                        *scroll_offset = 0;
+                    }
+                    KeyCode::End | KeyCode::Char('G') => {
+                        *scroll_offset = total_lines.saturating_sub(1);
                     }
                     _ => {}
                 }

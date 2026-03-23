@@ -344,8 +344,12 @@ match cmd {
             }
             if print_stdout {
                 // Write text directly — it already ends with \n from capture
-                let _ = write_stream.write_all(text.as_bytes());
-                let _ = write_stream.flush();
+                if persistent {
+                    let _ = tx.send(CtrlReq::ShowTextPopup("capture-pane".to_string(), text));
+                } else {
+                    let _ = write_stream.write_all(text.as_bytes());
+                    let _ = write_stream.flush();
+                }
                 if !persistent { break; }
             } else {
                 let _ = tx.send(CtrlReq::SetBuffer(text));
@@ -356,8 +360,12 @@ match cmd {
         let (rtx, rrx) = mpsc::channel::<String>();
         let _ = tx.send(CtrlReq::DumpLayout(rtx));
         if let Ok(text) = rrx.recv() { 
-            let _ = write!(write_stream, "{}\n", text); 
-            let _ = write_stream.flush();
+            if persistent {
+                let _ = tx.send(CtrlReq::ShowTextPopup("dump-layout".to_string(), text));
+            } else {
+                let _ = write!(write_stream, "{}\n", text); 
+                let _ = write_stream.flush();
+            }
         }
         if !persistent { break; }
     }
@@ -485,7 +493,7 @@ match cmd {
         }
         if !persistent { break; }
     }
-    "list-tree" => { let (rtx, rrx) = mpsc::channel::<String>(); let _ = tx.send(CtrlReq::ListTree(rtx)); if let Ok(text) = rrx.recv() { let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush(); } if !persistent { break; } }
+    "list-tree" => { let (rtx, rrx) = mpsc::channel::<String>(); let _ = tx.send(CtrlReq::ListTree(rtx)); if let Ok(text) = rrx.recv() { if persistent { let _ = tx.send(CtrlReq::ShowTextPopup("list-tree".to_string(), text)); } else { let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush(); } } if !persistent { break; } }
     "toggle-sync" => { let _ = tx.send(CtrlReq::ToggleSync); }
     "set-pane-title" => { let title = args.join(" "); let _ = tx.send(CtrlReq::SetPaneTitle(title)); }
     "send-keys" => {
@@ -599,7 +607,7 @@ match cmd {
         if !persistent { break; }
     }
     "kill-window" | "killw" => { let _ = tx.send(CtrlReq::KillWindow); }
-    "kill-session" => { let _ = tx.send(CtrlReq::KillSession); }
+    "kill-session" | "kill-ses" => { let _ = tx.send(CtrlReq::KillSession); }
     "has-session" => {
         let (rtx, rrx) = mpsc::channel::<bool>();
         let _ = tx.send(CtrlReq::HasSession(rtx));
@@ -685,20 +693,38 @@ match cmd {
         } else {
             let _ = tx.send(CtrlReq::ListBuffers(rtx));
         }
-        if let Ok(text) = rrx.recv() { let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush(); }
+        if let Ok(text) = rrx.recv() {
+            if persistent {
+                let _ = tx.send(CtrlReq::ShowTextPopup("list-buffers".to_string(), text));
+            } else {
+                let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+            }
+        }
         if !persistent { break; }
     }
-    "show-buffer" => {
+    "show-buffer" | "showb" => {
         let (rtx, rrx) = mpsc::channel::<String>();
         let _ = tx.send(CtrlReq::ShowBuffer(rtx));
-        if let Ok(text) = rrx.recv() { let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush(); }
+        if let Ok(text) = rrx.recv() {
+            if persistent {
+                let _ = tx.send(CtrlReq::ShowTextPopup("show-buffer".to_string(), text));
+            } else {
+                let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+            }
+        }
         if !persistent { break; }
     }
     "delete-buffer" => { let _ = tx.send(CtrlReq::DeleteBuffer); }
-    "choose-buffer" => {
+    "choose-buffer" | "chooseb" => {
         let (rtx, rrx) = mpsc::channel::<String>();
         let _ = tx.send(CtrlReq::ChooseBuffer(rtx));
-        if let Ok(text) = rrx.recv() { let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush(); }
+        if let Ok(text) = rrx.recv() {
+            if persistent {
+                let _ = tx.send(CtrlReq::ShowTextPopup("choose-buffer".to_string(), text));
+            } else {
+                let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+            }
+        }
         if !persistent { break; }
     }
     "display-message" | "display" => {
@@ -732,8 +758,12 @@ match cmd {
         let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt, target_pane_idx, !print_stdout));
         if let Ok(text) = rrx.recv() {
             if print_stdout {
-                let _ = writeln!(write_stream, "{}", text);
-                let _ = write_stream.flush();
+                if persistent {
+                    let _ = tx.send(CtrlReq::ShowTextPopup("display-message".to_string(), text));
+                } else {
+                    let _ = writeln!(write_stream, "{}", text);
+                    let _ = write_stream.flush();
+                }
             }
         }
         if !persistent { break; }
@@ -755,7 +785,13 @@ match cmd {
     "session-info" => {
         let (rtx, rrx) = mpsc::channel::<String>();
         let _ = tx.send(CtrlReq::SessionInfo(rtx));
-        if let Ok(line) = rrx.recv() { let _ = write!(write_stream, "{}\n", line); let _ = write_stream.flush(); }
+        if let Ok(line) = rrx.recv() {
+            if persistent {
+                let _ = tx.send(CtrlReq::ShowTextPopup("session-info".to_string(), line));
+            } else {
+                let _ = write!(write_stream, "{}\n", line); let _ = write_stream.flush();
+            }
+        }
         if !persistent { break; }
     }
     "client-attach" => {
@@ -804,7 +840,13 @@ match cmd {
     "list-keys" | "lsk" => {
         let (rtx, rrx) = mpsc::channel::<String>();
         let _ = tx.send(CtrlReq::ListKeys(rtx));
-        if let Ok(text) = rrx.recv() { let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush(); }
+        if let Ok(text) = rrx.recv() {
+            if persistent {
+                let _ = tx.send(CtrlReq::ShowTextPopup("list-keys".to_string(), text));
+            } else {
+                let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+            }
+        }
         if !persistent { break; }
     }
     "set-option" | "set" | "set-window-option" | "setw" => {
@@ -857,12 +899,17 @@ match cmd {
                         text
                     };
                     if !(has_q && resolved.is_empty()) {
-                        if has_v {
-                            let _ = write!(write_stream, "{}\n", resolved);
+                        let output = if has_v {
+                            format!("{}\n", resolved)
                         } else {
-                            let _ = write!(write_stream, "{} {}\n", name, resolved);
+                            format!("{} {}\n", name, resolved)
+                        };
+                        if persistent {
+                            let _ = tx.send(CtrlReq::ShowTextPopup("show-options".to_string(), output));
+                        } else {
+                            let _ = write_stream.write_all(output.as_bytes());
+                            let _ = write_stream.flush();
                         }
-                        let _ = write_stream.flush();
                     }
                 }
             }
@@ -881,13 +928,23 @@ match cmd {
                             text.push_str(&session_text);
                         }
                     }
-                    let _ = write!(write_stream, "{}\n", text);
-                    let _ = write_stream.flush();
+                    if persistent {
+                        let _ = tx.send(CtrlReq::ShowTextPopup("show-options".to_string(), text));
+                    } else {
+                        let _ = write!(write_stream, "{}\n", text);
+                        let _ = write_stream.flush();
+                    }
                 }
             } else {
                 let (rtx, rrx) = mpsc::channel::<String>();
                 let _ = tx.send(CtrlReq::ShowOptions(rtx));
-                if let Ok(text) = rrx.recv() { let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush(); }
+                if let Ok(text) = rrx.recv() {
+                    if persistent {
+                        let _ = tx.send(CtrlReq::ShowTextPopup("show-options".to_string(), text));
+                    } else {
+                        let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+                    }
+                }
             }
         }
         if !persistent { break; }
@@ -927,7 +984,13 @@ match cmd {
         let pattern = args.iter().find(|a| !a.starts_with('-')).unwrap_or(&"").to_string();
         let (rtx, rrx) = mpsc::channel::<String>();
         let _ = tx.send(CtrlReq::FindWindow(rtx, pattern));
-        if let Ok(text) = rrx.recv() { let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush(); }
+        if let Ok(text) = rrx.recv() {
+            if persistent {
+                let _ = tx.send(CtrlReq::ShowTextPopup("find-window".to_string(), text));
+            } else {
+                let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+            }
+        }
         if !persistent { break; }
     }
     "move-pane" | "movep" => {
@@ -951,7 +1014,7 @@ match cmd {
         let layout = args.iter().find(|a| !a.starts_with('-')).unwrap_or(&"tiled").to_string();
         let _ = tx.send(CtrlReq::SelectLayout(layout));
     }
-    "next-layout" => {
+    "next-layout" | "nextl" => {
         let _ = tx.send(CtrlReq::NextLayout);
     }
     "list-clients" | "lsc" => {
@@ -976,19 +1039,19 @@ match cmd {
             let _ = tx.send(CtrlReq::SwitchClient(target));
         }
     }
-    "lock-client" => {
+    "lock-client" | "lockc" => {
         let _ = tx.send(CtrlReq::LockClient);
     }
-    "refresh-client" => {
+    "refresh-client" | "refresh" => {
         let _ = tx.send(CtrlReq::RefreshClient);
     }
-    "suspend-client" => {
+    "suspend-client" | "suspendc" => {
         let _ = tx.send(CtrlReq::SuspendClient);
     }
     "copy-mode-page-up" => {
         let _ = tx.send(CtrlReq::CopyModePageUp);
     }
-    "clear-history" => {
+    "clear-history" | "clearhist" => {
         let _ = tx.send(CtrlReq::ClearHistory);
     }
     "save-buffer" | "saveb" => {
@@ -1015,7 +1078,13 @@ match cmd {
     "show-environment" | "showenv" => {
         let (rtx, rrx) = mpsc::channel::<String>();
         let _ = tx.send(CtrlReq::ShowEnvironment(rtx));
-        if let Ok(text) = rrx.recv() { let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush(); }
+        if let Ok(text) = rrx.recv() {
+            if persistent {
+                let _ = tx.send(CtrlReq::ShowTextPopup("show-environment".to_string(), text));
+            } else {
+                let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+            }
+        }
         if !persistent { break; }
     }
     "set-hook" => {
@@ -1141,7 +1210,13 @@ match cmd {
         // For now, map to listing which the client renders as a chooser
         let (rtx, rrx) = mpsc::channel::<String>();
         let _ = tx.send(CtrlReq::ListTree(rtx));
-        if let Ok(text) = rrx.recv() { let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush(); }
+        if let Ok(text) = rrx.recv() {
+            if persistent {
+                let _ = tx.send(CtrlReq::ShowTextPopup("choose-tree".to_string(), text));
+            } else {
+                let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+            }
+        }
         if !persistent { break; }
     }
     "copy-mode" => {
@@ -1190,7 +1265,13 @@ match cmd {
     "show-messages" | "showmsgs" => {
         let (rtx, rrx) = mpsc::channel::<String>();
         let _ = tx.send(CtrlReq::ShowMessages(rtx));
-        if let Ok(text) = rrx.recv() { let _ = write!(write_stream, "{}", text); let _ = write_stream.flush(); }
+        if let Ok(text) = rrx.recv() {
+            if persistent {
+                let _ = tx.send(CtrlReq::ShowTextPopup("show-messages".to_string(), text));
+            } else {
+                let _ = write!(write_stream, "{}", text); let _ = write_stream.flush();
+            }
+        }
         if !persistent { break; }
     }
     "command-prompt" => {
@@ -1275,11 +1356,23 @@ match cmd {
         if let Some(fmt_str) = fmt {
             let (rtx, rrx) = mpsc::channel::<String>();
             let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt_str, None, false));
-            if let Ok(text) = rrx.recv() { let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush(); }
+            if let Ok(text) = rrx.recv() {
+                if persistent {
+                    let _ = tx.send(CtrlReq::ShowTextPopup("list-sessions".to_string(), text));
+                } else {
+                    let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+                }
+            }
         } else {
             let (rtx, rrx) = mpsc::channel::<String>();
             let _ = tx.send(CtrlReq::SessionInfo(rtx));
-            if let Ok(text) = rrx.recv() { let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush(); }
+            if let Ok(text) = rrx.recv() {
+                if persistent {
+                    let _ = tx.send(CtrlReq::ShowTextPopup("list-sessions".to_string(), text));
+                } else {
+                    let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+                }
+            }
         }
         if !persistent { break; }
     }
@@ -1299,7 +1392,13 @@ match cmd {
     "server-info" | "info" => {
         let (rtx, rrx) = mpsc::channel::<String>();
         let _ = tx.send(CtrlReq::ServerInfo(rtx));
-        if let Ok(text) = rrx.recv() { let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush(); }
+        if let Ok(text) = rrx.recv() {
+            if persistent {
+                let _ = tx.send(CtrlReq::ShowTextPopup("server-info".to_string(), text));
+            } else {
+                let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
+            }
+        }
         if !persistent { break; }
     }
     "start-server" => {
@@ -1324,7 +1423,7 @@ match cmd {
     "respawn-window" | "respawnw" => {
         let _ = tx.send(CtrlReq::RespawnWindow);
     }
-    "lock-server" | "lock-session" | "lock" => {
+    "lock-server" | "lock-session" | "lock" | "locks" => {
         // Lock is a no-op on Windows (no terminal locking concept)
         // Stub for compatibility
     }
@@ -1335,6 +1434,19 @@ match cmd {
     }
     "customize-mode" => {
         // tmux 3.2+ customize-mode — stub for compatibility
+    }
+    "clear-prompt-history" | "clearphist" => {
+        // Prompt history not tracked — stub for compatibility
+    }
+    "show-prompt-history" | "showphist" => {
+        // Prompt history not tracked — stub for compatibility
+        if persistent {
+            let _ = tx.send(CtrlReq::ShowTextPopup("show-prompt-history".to_string(),
+                "(prompt history not available)\n".to_string()));
+        }
+    }
+    "server-access" => {
+        // Multi-user server access — not applicable to psmux
     }
     _ => {}
 }

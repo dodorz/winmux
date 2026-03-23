@@ -215,9 +215,10 @@ fn check_pane_bells(node: &Node) -> bool {
 /// Complete list of supported tmux-compatible commands (for list-commands).
 pub(crate) const TMUX_COMMANDS: &[&str] = &[
     "attach-session (attach)", "bind-key (bind)", "break-pane (breakp)",
-    "capture-pane (capturep)", "choose-buffer", "choose-client",
+    "capture-pane (capturep)", "choose-buffer (chooseb)", "choose-client",
     "choose-session", "choose-tree", "choose-window",
-    "clear-history (clearhist)", "clock-mode", "command-prompt",
+    "clear-history (clearhist)", "clear-prompt-history (clearphist)",
+    "clock-mode", "command-prompt",
     "confirm-before (confirm)", "copy-mode", "customize-mode",
     "delete-buffer (deleteb)", "detach-client (detach)",
     "display-menu (menu)", "display-message (display)",
@@ -249,7 +250,8 @@ pub(crate) const TMUX_COMMANDS: &[&str] = &[
     "set-window-option (setw)", "show-buffer (showb)",
     "show-environment (showenv)", "show-hooks",
     "show-messages (showmsgs)", "show-options (show)",
-    "show-window-options (showw)", "source-file (source)",
+    "show-prompt-history (showphist)", "show-window-options (showw)",
+    "source-file (source)",
     "split-window (splitw)", "start-server (start)",
     "suspend-client (suspendc)", "swap-pane (swapp)",
     "swap-window (swapw)", "switch-client (switchc)",
