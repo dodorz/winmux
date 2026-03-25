@@ -1943,11 +1943,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                         let clear = if cfg!(windows) { "cls" } else { "clear" };
                                         let cd_cmd = format!(" cd '{}'; {}\r", escaped, clear);
                                         // Tell the vt100 parser to watch for the
-                                        // next screen-clear event (CSI 2J).
+                                        // next screen-clear event (CSI 2J/3J).
                                         if let Ok(mut parser) = p.term.lock() {
                                             parser.screen_mut().set_squelch_clear_pending(true);
                                         }
-                                        p.squelch_until = Some(Instant::now() + Duration::from_secs(5));
+                                        p.squelch_until = Some(Instant::now() + Duration::from_millis(500));
                                         let _ = p.writer.write_all(cd_cmd.as_bytes());
                                         let _ = p.writer.flush();
                                     }

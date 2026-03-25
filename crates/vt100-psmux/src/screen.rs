@@ -699,10 +699,18 @@ impl Screen {
         v
     }
 
-    /// Arm the squelch detector: the next CSI 2J (erase display) will
+    /// Arm the squelch detector: the next CSI 2J or CSI 3J will
     /// set `squelch_cleared` to `true`.
     pub fn set_squelch_clear_pending(&mut self, v: bool) {
         self.squelch_clear_pending = v;
+    }
+
+    /// Internal: fire the squelch signal if armed.
+    fn check_squelch_signal(&mut self) {
+        if self.squelch_clear_pending {
+            self.squelch_cleared = true;
+            self.squelch_clear_pending = false;
+        }
     }
 
     /// Returns the currently active foreground color.
@@ -1138,12 +1146,12 @@ impl Screen {
             1 => self.grid_mut().erase_all_backward(attrs),
             2 => {
                 self.grid_mut().erase_all(attrs);
-                if self.squelch_clear_pending {
-                    self.squelch_cleared = true;
-                    self.squelch_clear_pending = false;
-                }
+                self.check_squelch_signal();
             }
-            3 => self.grid_mut().clear_scrollback(),
+            3 => {
+                self.grid_mut().clear_scrollback();
+                self.check_squelch_signal();
+            }
             _ => unhandled(self),
         }
     }
