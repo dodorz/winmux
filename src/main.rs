@@ -12,6 +12,7 @@ mod rendering;
 mod config;
 mod commands;
 mod pane;
+mod popup;
 mod copy_mode;
 mod input;
 mod layout;

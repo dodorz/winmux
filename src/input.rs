@@ -885,12 +885,12 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
             }
             Ok(false)
         }
-        Mode::PopupMode { ref mut output, ref mut process, close_on_exit, ref mut popup_pty, ref mut scroll_offset, .. } => {
+        Mode::PopupMode { ref mut output, ref mut process, close_on_exit, ref mut popup_pane, ref mut scroll_offset, .. } => {
             let mut should_close = false;
             let mut exit_status: Option<std::process::ExitStatus> = None;
             
             // If we have a PTY popup, forward keys to it
-            if let Some(ref mut pty) = popup_pty {
+            if let Some(ref mut pty) = popup_pane {
                 match key.code {
                     KeyCode::Esc => {
                         // Check if the child has exited
@@ -2276,8 +2276,8 @@ pub fn send_text_to_active(app: &mut AppState, text: &str) -> io::Result<()> {
             app.mode = Mode::Passthrough;
             return Ok(());
         }
-        if let Mode::PopupMode { ref mut popup_pty, .. } = app.mode {
-            if let Some(ref mut pty) = popup_pty {
+        if let Mode::PopupMode { ref mut popup_pane, .. } = app.mode {
+            if let Some(ref mut pty) = popup_pane {
                 let _ = pty.writer.write_all(text.as_bytes());
                 let _ = pty.writer.flush();
             }
@@ -2505,8 +2505,8 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
             _ => None,
         };
         if let Some(seq) = seq {
-            if let Mode::PopupMode { ref mut popup_pty, .. } = app.mode {
-                if let Some(ref mut pty) = popup_pty {
+            if let Mode::PopupMode { ref mut popup_pane, .. } = app.mode {
+                if let Some(ref mut pty) = popup_pane {
                     let _ = pty.writer.write_all(seq.as_bytes());
                     let _ = pty.writer.flush();
                 }

@@ -146,13 +146,8 @@ pub struct Hook {
     pub command: String,
 }
 
-/// Interactive PTY for popup window (supports fzf, etc.)
-pub struct PopupPty {
-    pub master: Box<dyn portable_pty::MasterPty>,
-    pub writer: Box<dyn std::io::Write + Send>,
-    pub child: Box<dyn portable_pty::Child>,
-    pub term: std::sync::Arc<std::sync::Mutex<vt100::Parser>>,
-}
+// PopupPty has been removed: popups now store an actual Pane
+// (see src/popup.rs for the popup-as-pane architecture).
 
 /// Pipe pane state - process piping pane output
 pub struct PipePaneState {
@@ -179,7 +174,9 @@ pub enum Mode {
     PaneChooser { opened_at: Instant },
     /// Interactive menu mode
     MenuMode { menu: Menu },
-    /// Popup window running a command (with optional PTY for interactive programs)
+    /// Popup window running a command.
+    /// Interactive popups store a real `Pane` (same type as tiled panes),
+    /// inheriting all pane features: vt100 parsing, colors, PTY I/O.
     PopupMode { 
         command: String, 
         output: String, 
@@ -187,8 +184,8 @@ pub enum Mode {
         width: u16,
         height: u16,
         close_on_exit: bool,
-        /// Optional: interactive PTY for the popup (fzf, etc.)  
-        popup_pty: Option<PopupPty>,
+        /// Optional: full Pane powering the popup (for interactive programs)
+        popup_pane: Option<Pane>,
         /// Scroll offset for static text popups (lines from top)
         scroll_offset: u16,
     },

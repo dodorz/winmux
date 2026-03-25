@@ -1,7 +1,7 @@
 use std::io;
 use std::time::Instant;
 
-use crate::types::{AppState, Mode, Action, FocusDir, LayoutKind, MenuItem, Menu, PopupPty, Node};
+use crate::types::{AppState, Mode, Action, FocusDir, LayoutKind, MenuItem, Menu, Node};
 use crate::tree::{compute_rects, kill_all_children, get_active_pane_id};
 use crate::pane::{create_window, split_active, kill_active_pane};
 use crate::copy_mode::{enter_copy_mode, switch_with_copy_save, paste_latest,
@@ -35,7 +35,7 @@ fn show_output_popup(app: &mut AppState, title: &str, output: String) {
         width: width.min(120),
         height,
         close_on_exit: false,
-        popup_pty: None,
+        popup_pane: None,
         scroll_offset: 0,
     };
 }
@@ -763,44 +763,17 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
                 .collect::<Vec<&str>>()
                 .join(" ");
             
-            // Try PTY-based popup for interactive commands
-            let pty_result = if !rest.is_empty() {
-                Some(portable_pty::native_pty_system())
-                    .and_then(|pty_sys| {
-                        let pty_size = portable_pty::PtySize { rows: height.saturating_sub(2), cols: width.saturating_sub(2), pixel_width: 0, pixel_height: 0 };
-                        let pair = pty_sys.openpty(pty_size).ok()?;
-                        let mut cmd_builder = portable_pty::CommandBuilder::new(if cfg!(windows) { "pwsh" } else { "sh" });
-                        if let Some(ref dir) = start_dir {
-                            cmd_builder.cwd(dir);
-                        } else if let Ok(dir) = std::env::current_dir() {
-                            cmd_builder.cwd(dir);
-                        }
-                        // Set TERM/COLORTERM so programs in popups get color support (#154)
-                        cmd_builder.env("TERM", "xterm-256color");
-                        cmd_builder.env("COLORTERM", "truecolor");
-                        cmd_builder.env("PSMUX_SESSION", "1");
-                        crate::pane::apply_user_environment(&mut cmd_builder, &app.environment);
-                        if cfg!(windows) { cmd_builder.args(["-NoProfile", "-Command", &rest]); } else { cmd_builder.args(["-c", &rest]); }
-                        let child = pair.slave.spawn_command(cmd_builder).ok()?;
-                        // Close the slave handle immediately – required for ConPTY.
-                        drop(pair.slave);
-                        let term = std::sync::Arc::new(std::sync::Mutex::new(vt100::Parser::new(pty_size.rows, pty_size.cols, 0)));
-                        let term_reader = term.clone();
-                        if let Ok(mut reader) = pair.master.try_clone_reader() {
-                            std::thread::spawn(move || {
-                                let mut buf = [0u8; 8192];
-                                loop {
-                                    match std::io::Read::read(&mut reader, &mut buf) {
-                                        Ok(n) if n > 0 => { if let Ok(mut p) = term_reader.lock() { p.process(&buf[..n]); } }
-                                        _ => break,
-                                    }
-                                }
-                            });
-                        }
-                        let mut pty_writer = pair.master.take_writer().ok()?;
-                        crate::pane::conpty_preemptive_dsr_response(&mut *pty_writer);
-                        Some(PopupPty { master: pair.master, writer: pty_writer, child, term })
-                    })
+            // Spawn popup as a real Pane via the popup module
+            let pane_result = if !rest.is_empty() {
+                crate::popup::create_popup_pane(
+                    &rest,
+                    start_dir.as_deref(),
+                    height.saturating_sub(2),
+                    width.saturating_sub(2),
+                    app.next_pane_id,
+                    "1", // session name not available in local mode
+                    &app.environment,
+                )
             } else { None };
             
             app.mode = Mode::PopupMode {
@@ -810,7 +783,7 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
                 width,
                 height,
                 close_on_exit,
-                popup_pty: pty_result,
+                popup_pane: pane_result,
                 scroll_offset: 0,
             };
         }
