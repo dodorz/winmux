@@ -4,9 +4,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use std::net::TcpStream;
 
-use crate::types::{CtrlReq, LayoutKind, WaitForOp};
+use crate::types::{CtrlReq, LayoutKind, WaitForOp, ControlNotification};
 use crate::cli::parse_target;
 use crate::util::base64_decode;
+use crate::control;
 
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 use crate::commands::parse_command_line;
@@ -114,6 +115,211 @@ if line.trim() == "PERSISTENT" {
     if r.read_line(&mut line).is_err() {
         return;
     }
+}
+
+// Check for CONTROL or CONTROL_NOECHO (control mode)
+let control_echo = line.trim() == "CONTROL";
+let control_noecho = line.trim() == "CONTROL_NOECHO";
+if control_echo || control_noecho {
+    let _ = r.get_ref().set_nodelay(true);
+    let _ = write_stream.set_nodelay(true);
+    let _ = r.get_ref().set_read_timeout(Some(Duration::from_millis(5000)));
+
+    crate::types::register_persistent_stream(&write_stream);
+
+    let ctrl_client_id = crate::types::next_control_client_id();
+    let (notif_tx, notif_rx) = std::sync::mpsc::sync_channel::<ControlNotification>(4096);
+
+    // Register with server
+    let _ = tx.send(CtrlReq::ControlRegister {
+        client_id: ctrl_client_id,
+        echo: control_echo,
+        notif_tx: notif_tx,
+    });
+
+    // Spawn notification writer thread
+    let mut ws_notif = match write_stream.try_clone() {
+        Ok(s) => s,
+        Err(_) => {
+            let _ = tx.send(CtrlReq::ControlDeregister { client_id: ctrl_client_id });
+            return;
+        }
+    };
+    let cc_no_echo = control_noecho;
+    let notif_thread = std::thread::spawn(move || {
+        while let Ok(notif) = notif_rx.recv() {
+            let is_exit = matches!(notif, ControlNotification::Exit { .. });
+            let formatted = control::format_notification(&notif);
+            if writeln!(ws_notif, "{}", formatted).is_err() { break; }
+            // In -CC mode, send ST (ESC \) after %exit per tmux protocol
+            if is_exit && cc_no_echo {
+                let _ = ws_notif.write_all(b"\x1b\\");
+            }
+            if ws_notif.flush().is_err() { break; }
+            if is_exit { break; }
+        }
+    });
+
+    // Control mode command loop: read lines, dispatch, wrap in %begin/%end/%error
+    let mut cmd_counter: u64 = 0;
+    let tx_ctrl = tx.clone();
+    let aliases_ctrl = aliases.clone();
+
+    // Notify client that control mode is ready
+    let _ = writeln!(write_stream);
+    let _ = write_stream.flush();
+
+    loop {
+        line.clear();
+        match r.read_line(&mut line) {
+            Ok(0) => break, // EOF
+            Err(e) => {
+                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut {
+                    continue;
+                }
+                break;
+            }
+            Ok(_) => {}
+        }
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() { continue; }
+
+        cmd_counter += 1;
+        let ts = chrono::Utc::now().timestamp();
+
+        // Echo the command if -C mode
+        if control_echo {
+            let _ = writeln!(write_stream, "{}", trimmed);
+            let _ = write_stream.flush();
+        }
+
+        // Send %begin
+        let _ = writeln!(write_stream, "{}", control::format_begin(ts, cmd_counter));
+        let _ = write_stream.flush();
+
+        // Dispatch the command
+        let parsed = parse_command_line(trimmed);
+        let raw_cmd = parsed.first().map(|s| s.as_str()).unwrap_or("");
+
+        if raw_cmd.is_empty() {
+            let _ = writeln!(write_stream, "{}", control::format_end(ts, cmd_counter));
+            let _ = write_stream.flush();
+            continue;
+        }
+
+        // Check aliases
+        let alias_expanded = if let Ok(map) = aliases_ctrl.read() {
+            map.get(raw_cmd).cloned()
+        } else { None };
+
+        let (cmd_name, cmd_args): (&str, Vec<&str>) = if let Some(ref expanded) = alias_expanded {
+            let parts: Vec<&str> = expanded.split_whitespace().collect();
+            let mut all: Vec<&str> = parts[1..].to_vec();
+            all.extend(parsed.iter().skip(1).map(|s| s.as_str()));
+            (parts.first().copied().unwrap_or(raw_cmd), all)
+        } else {
+            (raw_cmd, parsed.iter().skip(1).map(|s| s.as_str()).collect())
+        };
+
+        // Parse -t from command args
+        let mut ctrl_target_win: Option<usize> = None;
+        let mut ctrl_target_pane: Option<usize> = None;
+        let mut ctrl_pane_is_id = false;
+        let mut ctrl_raw_target: Option<String> = None;
+        {
+            let mut i = 0;
+            while i < cmd_args.len() {
+                if cmd_args[i] == "-t" {
+                    if let Some(v) = cmd_args.get(i+1) {
+                        ctrl_raw_target = Some(v.to_string());
+                        let pt = parse_target(v);
+                        if pt.window.is_some() { ctrl_target_win = pt.window; }
+                        if pt.pane.is_some() {
+                            ctrl_target_pane = pt.pane;
+                            ctrl_pane_is_id = pt.pane_is_id;
+                        }
+                    }
+                    i += 2; continue;
+                }
+                i += 1;
+            }
+        }
+
+        // Build filtered args (without -t)
+        let filtered_args: Vec<&str> = {
+            let mut filtered = Vec::new();
+            let mut i = 0;
+            while i < cmd_args.len() {
+                if cmd_args[i] == "-t" { i += 2; continue; }
+                filtered.push(cmd_args[i]);
+                i += 1;
+            }
+            filtered
+        };
+
+        // Apply target focus
+        let is_focus_cmd = matches!(cmd_name, "select-window" | "selectw" | "select-pane" | "selectp")
+            || (matches!(cmd_name, "split-window" | "splitw") && !filtered_args.iter().any(|a| *a == "-d"));
+        if let Some(wid) = ctrl_target_win {
+            if is_focus_cmd {
+                let _ = tx_ctrl.send(CtrlReq::FocusWindow(wid));
+            } else {
+                let _ = tx_ctrl.send(CtrlReq::FocusWindowTemp(wid));
+            }
+        }
+        if let Some(pid) = ctrl_target_pane {
+            if is_focus_cmd {
+                if ctrl_pane_is_id {
+                    let _ = tx_ctrl.send(CtrlReq::FocusPane(pid));
+                } else {
+                    let _ = tx_ctrl.send(CtrlReq::FocusPaneByIndex(pid));
+                }
+            } else {
+                if ctrl_pane_is_id {
+                    let _ = tx_ctrl.send(CtrlReq::FocusPaneTemp(pid));
+                } else {
+                    let _ = tx_ctrl.send(CtrlReq::FocusPaneByIndexTemp(pid));
+                }
+            }
+        }
+
+        // Dispatch command (use a oneshot for the response)
+        let (resp_s, resp_r) = mpsc::channel::<String>();
+        let dispatched = dispatch_control_command(
+            cmd_name, &filtered_args, &tx_ctrl, resp_s,
+            ctrl_target_pane, ctrl_pane_is_id, ctrl_raw_target.as_deref(),
+            ctrl_client_id,
+        );
+
+        if dispatched {
+            // Wait for response with timeout
+            match resp_r.recv_timeout(Duration::from_secs(5)) {
+                Ok(response) => {
+                    if !response.is_empty() {
+                        let _ = write!(write_stream, "{}", response);
+                        if !response.ends_with('\n') {
+                            let _ = writeln!(write_stream);
+                        }
+                    }
+                    let _ = writeln!(write_stream, "{}", control::format_end(ts, cmd_counter));
+                }
+                Err(_) => {
+                    let _ = writeln!(write_stream, "command timed out");
+                    let _ = writeln!(write_stream, "{}", control::format_error(ts, cmd_counter));
+                }
+            }
+        } else {
+            // Command dispatched without response channel (fire and forget)
+            let _ = writeln!(write_stream, "{}", control::format_end(ts, cmd_counter));
+        }
+        let _ = write_stream.flush();
+    }
+
+    // Deregister and clean up
+    let _ = tx.send(CtrlReq::ControlDeregister { client_id: ctrl_client_id });
+    drop(notif_thread);
+    return;
 }
 
 // Check if this line is a TARGET specification
@@ -1471,4 +1677,479 @@ match cmd {
         Ok(_) => {} // Continue processing
     }
 } // end command loop
+}
+
+/// Dispatch a command from a control mode client.
+/// Returns true if a response was sent through `resp_tx`, false for fire-and-forget commands.
+fn dispatch_control_command(
+    cmd: &str,
+    args: &[&str],
+    tx: &mpsc::Sender<CtrlReq>,
+    resp_tx: mpsc::Sender<String>,
+    target_pane: Option<usize>,
+    pane_is_id: bool,
+    _raw_target: Option<&str>,
+    _client_id: u64,
+) -> bool {
+    match cmd {
+        "list-windows" | "lsw" => {
+            let format_str = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].to_string());
+            let (rtx, rrx) = mpsc::channel::<String>();
+            if let Some(fmt) = format_str {
+                let _ = tx.send(CtrlReq::ListWindowsFormat(rtx, fmt));
+            } else {
+                let _ = tx.send(CtrlReq::ListWindowsTmux(rtx));
+            }
+            if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
+                let _ = resp_tx.send(text);
+            }
+            true
+        }
+        "list-panes" | "lsp" => {
+            let all = args.iter().any(|a| *a == "-a");
+            let format_str = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].to_string());
+            let (rtx, rrx) = mpsc::channel::<String>();
+            if all {
+                if let Some(fmt) = format_str {
+                    let _ = tx.send(CtrlReq::ListAllPanesFormat(rtx, fmt));
+                } else {
+                    let _ = tx.send(CtrlReq::ListAllPanes(rtx));
+                }
+            } else {
+                if let Some(fmt) = format_str {
+                    let _ = tx.send(CtrlReq::ListPanesFormat(rtx, fmt));
+                } else {
+                    let _ = tx.send(CtrlReq::ListPanes(rtx));
+                }
+            }
+            if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
+                let _ = resp_tx.send(text);
+            }
+            true
+        }
+        "display-message" | "display" => {
+            let print_mode = args.iter().any(|a| *a == "-p");
+            let fmt = args.last().map(|s| s.trim_matches('"').to_string()).unwrap_or_default();
+            let target_pane_idx = if pane_is_id { None } else { target_pane };
+            let (rtx, rrx) = mpsc::channel::<String>();
+            let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt, target_pane_idx, !print_mode));
+            if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
+                let _ = resp_tx.send(text);
+            }
+            true
+        }
+        "new-window" | "neww" => {
+            let name = args.windows(2).find(|w| w[0] == "-n").map(|w| w[1].trim_matches('"').to_string());
+            let start_dir = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].trim_matches('"').to_string());
+            let detached = args.iter().any(|a| *a == "-d");
+            let print_info = args.iter().any(|a| *a == "-P");
+            let format_str = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].trim_matches('"').to_string());
+            let cmd_str: Option<String> = args.iter()
+                .find(|a| !a.starts_with('-') && args.windows(2).all(|w| !(w[0] == "-n" && w[1] == **a))
+                    && args.windows(2).all(|w| !(w[0] == "-c" && w[1] == **a))
+                    && args.windows(2).all(|w| !(w[0] == "-F" && w[1] == **a)))
+                .map(|s| s.trim_matches('"').to_string());
+            if print_info {
+                let (rtx, rrx) = mpsc::channel::<String>();
+                let _ = tx.send(CtrlReq::NewWindowPrint(cmd_str, name, detached, start_dir, format_str, rtx));
+                if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
+                    let _ = resp_tx.send(text);
+                }
+                true
+            } else {
+                let _ = tx.send(CtrlReq::NewWindow(cmd_str, name, detached, start_dir));
+                let _ = resp_tx.send(String::new());
+                true
+            }
+        }
+        "split-window" | "splitw" => {
+            let kind = if args.iter().any(|a| *a == "-h") {
+                LayoutKind::Horizontal
+            } else {
+                LayoutKind::Vertical
+            };
+            let cmd_str = args.windows(2).find(|w| w[0] == "-c").map(|_| ()).and(None);
+            let start_dir = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].trim_matches('"').to_string());
+            let detached = args.iter().any(|a| *a == "-d");
+            let print_info = args.iter().any(|a| *a == "-P");
+            let format_str = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].trim_matches('"').to_string());
+            let size_pct = args.windows(2).find(|w| w[0] == "-p" || w[0] == "-l")
+                .and_then(|w| w[1].trim_end_matches('%').parse::<u16>().ok());
+            let (rtx, rrx) = mpsc::channel::<String>();
+            if print_info {
+                let _ = tx.send(CtrlReq::SplitWindowPrint(kind, cmd_str, detached, start_dir, size_pct, format_str, rtx));
+            } else {
+                let _ = tx.send(CtrlReq::SplitWindow(kind, cmd_str, detached, start_dir, size_pct, rtx));
+            }
+            if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
+                let _ = resp_tx.send(text);
+            }
+            true
+        }
+        "send-keys" => {
+            let literal = args.iter().any(|a| *a == "-l");
+            let keys: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
+            let text = keys.join(" ");
+            let _ = tx.send(CtrlReq::SendKeys(text, literal));
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "capture-pane" | "capturep" => {
+            let start = args.windows(2).find(|w| w[0] == "-S").and_then(|w| w[1].parse::<i32>().ok());
+            let end = args.windows(2).find(|w| w[0] == "-E").and_then(|w| w[1].parse::<i32>().ok());
+            let styled = args.iter().any(|a| *a == "-e");
+            let (rtx, rrx) = mpsc::channel::<String>();
+            if styled {
+                let _ = tx.send(CtrlReq::CapturePaneStyled(rtx, start, end));
+            } else if start.is_some() || end.is_some() {
+                let _ = tx.send(CtrlReq::CapturePaneRange(rtx, start, end));
+            } else {
+                let _ = tx.send(CtrlReq::CapturePane(rtx));
+            }
+            if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
+                let _ = resp_tx.send(text);
+            }
+            true
+        }
+        "kill-pane" | "killp" => {
+            if pane_is_id {
+                if let Some(pid) = target_pane {
+                    let _ = tx.send(CtrlReq::KillPaneById(pid));
+                }
+            } else {
+                let _ = tx.send(CtrlReq::KillPane);
+            }
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "kill-window" | "killw" | "unlink-window" | "unlinkw" => {
+            let _ = tx.send(CtrlReq::KillWindow);
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "select-window" | "selectw" => {
+            // Already handled by target focus above
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "select-pane" | "selectp" => {
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "rename-window" | "renamew" => {
+            if let Some(name) = args.last() {
+                let _ = tx.send(CtrlReq::RenameWindow(name.trim_matches('"').to_string()));
+            }
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "rename-session" | "rename" => {
+            if let Some(name) = args.last() {
+                let _ = tx.send(CtrlReq::RenameSession(name.trim_matches('"').to_string()));
+            }
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "set-option" | "set" | "set-window-option" | "setw" => {
+            let quiet = args.iter().any(|a| *a == "-q");
+            let unset = args.iter().any(|a| *a == "-u");
+            let append = args.iter().any(|a| *a == "-a");
+            let global = args.iter().any(|a| *a == "-g");
+            let positional: Vec<&str> = args.iter()
+                .filter(|a| !a.starts_with('-') || a.starts_with('@'))
+                .copied().collect();
+            if unset && !positional.is_empty() {
+                let _ = tx.send(CtrlReq::SetOptionUnset(positional[0].to_string()));
+            } else if positional.len() >= 2 {
+                let key = positional[0].to_string();
+                let val = positional[1].trim_matches('"').to_string();
+                if append {
+                    let _ = tx.send(CtrlReq::SetOptionAppend(key, val));
+                } else if quiet || global {
+                    let _ = tx.send(CtrlReq::SetOptionQuiet(key, val, quiet));
+                } else {
+                    let _ = tx.send(CtrlReq::SetOption(key, val));
+                }
+            }
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "show-options" | "show" | "show-window-options" | "showw" => {
+            let (rtx, rrx) = mpsc::channel::<String>();
+            let value_only = args.windows(2).find(|w| w[0] == "-v").is_some();
+            let opt_name = args.iter().filter(|a| !a.starts_with('-')).next().map(|s| s.to_string());
+            if let Some(name) = opt_name {
+                if value_only {
+                    let _ = tx.send(CtrlReq::ShowOptionValue(rtx, name));
+                } else if cmd.starts_with("show-window") || cmd == "showw" {
+                    let _ = tx.send(CtrlReq::ShowWindowOptionValue(rtx, name));
+                } else {
+                    let _ = tx.send(CtrlReq::ShowOptionValue(rtx, name));
+                }
+            } else if cmd.starts_with("show-window") || cmd == "showw" {
+                let _ = tx.send(CtrlReq::ShowWindowOptions(rtx));
+            } else {
+                let _ = tx.send(CtrlReq::ShowOptions(rtx));
+            }
+            if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
+                let _ = resp_tx.send(text);
+            }
+            true
+        }
+        "list-keys" | "lsk" => {
+            let (rtx, rrx) = mpsc::channel::<String>();
+            let _ = tx.send(CtrlReq::ListKeys(rtx));
+            if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
+                let _ = resp_tx.send(text);
+            }
+            true
+        }
+        "list-sessions" | "ls" => {
+            let (rtx, rrx) = mpsc::channel::<String>();
+            let _ = tx.send(CtrlReq::SessionInfo(rtx));
+            if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
+                let _ = resp_tx.send(text);
+            }
+            true
+        }
+        "list-buffers" | "lsb" => {
+            let format_str = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].to_string());
+            let (rtx, rrx) = mpsc::channel::<String>();
+            if let Some(fmt) = format_str {
+                let _ = tx.send(CtrlReq::ListBuffersFormat(rtx, fmt));
+            } else {
+                let _ = tx.send(CtrlReq::ListBuffers(rtx));
+            }
+            if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
+                let _ = resp_tx.send(text);
+            }
+            true
+        }
+        "show-buffer" | "showb" => {
+            let (rtx, rrx) = mpsc::channel::<String>();
+            let _ = tx.send(CtrlReq::ShowBuffer(rtx));
+            if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
+                let _ = resp_tx.send(text);
+            }
+            true
+        }
+        "has-session" | "has" => {
+            let (rtx, rrx) = mpsc::channel::<bool>();
+            let _ = tx.send(CtrlReq::HasSession(rtx));
+            if let Ok(exists) = rrx.recv_timeout(Duration::from_secs(5)) {
+                let _ = resp_tx.send(if exists { String::new() } else { "session not found".to_string() });
+            }
+            true
+        }
+        "list-clients" | "lsc" => {
+            let (rtx, rrx) = mpsc::channel::<String>();
+            let _ = tx.send(CtrlReq::ListClients(rtx));
+            if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
+                let _ = resp_tx.send(text);
+            }
+            true
+        }
+        "kill-session" => {
+            let _ = tx.send(CtrlReq::KillSession);
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "kill-server" => {
+            let _ = tx.send(CtrlReq::KillServer);
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "select-layout" | "selectl" => {
+            if let Some(layout) = args.first() {
+                let _ = tx.send(CtrlReq::SelectLayout(layout.to_string()));
+            }
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "next-layout" | "nextl" => {
+            let _ = tx.send(CtrlReq::NextLayout);
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "resize-pane" | "resizep" => {
+            let axis = if args.iter().any(|a| *a == "-L" || *a == "-R") { "x" }
+                       else if args.iter().any(|a| *a == "-U" || *a == "-D") { "y" }
+                       else { "y" };
+            let dir = if args.iter().any(|a| *a == "-L" || *a == "-U") {
+                format!("-{}", axis)
+            } else {
+                axis.to_string()
+            };
+            let amount = args.iter().filter(|a| !a.starts_with('-')).next()
+                .and_then(|s| s.parse::<u16>().ok()).unwrap_or(1);
+            let _ = tx.send(CtrlReq::ResizePane(dir, amount));
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "swap-pane" | "swapp" => {
+            let direction = if args.iter().any(|a| *a == "-U") { "-U".to_string() }
+                           else if args.iter().any(|a| *a == "-D") { "-D".to_string() }
+                           else { "-D".to_string() };
+            let _ = tx.send(CtrlReq::SwapPane(direction));
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "bind-key" | "bind" => {
+            // Simplified bind: bind [-n] [-T table] key command
+            let no_prefix = args.iter().any(|a| *a == "-n");
+            let table_name = args.windows(2).find(|w| w[0] == "-T")
+                .map(|w| w[1].to_string())
+                .unwrap_or_else(|| if no_prefix { "root".to_string() } else { "prefix".to_string() });
+            let repeat = args.iter().any(|a| *a == "-r");
+            let positional: Vec<&str> = args.iter()
+                .filter(|a| !a.starts_with('-') && {
+                    let pos = args.iter().position(|x| x == *a).unwrap_or(0);
+                    !(pos > 0 && args[pos-1] == "-T")
+                })
+                .copied().collect();
+            if positional.len() >= 2 {
+                let key = positional[0].to_string();
+                let command = positional[1..].join(" ");
+                let _ = tx.send(CtrlReq::BindKey(table_name, key, command, repeat));
+            }
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "unbind-key" | "unbind" => {
+            if let Some(key) = args.iter().find(|a| !a.starts_with('-')) {
+                let _ = tx.send(CtrlReq::UnbindKey(key.to_string()));
+            }
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "source-file" | "source" => {
+            if let Some(path) = args.first() {
+                let _ = tx.send(CtrlReq::SourceFile(path.trim_matches('"').to_string()));
+            }
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "set-environment" | "setenv" => {
+            let unset = args.iter().any(|a| *a == "-u");
+            let positional: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
+            if unset && !positional.is_empty() {
+                let _ = tx.send(CtrlReq::UnsetEnvironment(positional[0].to_string()));
+            } else if positional.len() >= 2 {
+                let _ = tx.send(CtrlReq::SetEnvironment(positional[0].to_string(), positional[1].to_string()));
+            }
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "show-environment" | "showenv" => {
+            let (rtx, rrx) = mpsc::channel::<String>();
+            let _ = tx.send(CtrlReq::ShowEnvironment(rtx));
+            if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
+                let _ = resp_tx.send(text);
+            }
+            true
+        }
+        "set-hook" => {
+            let positional: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
+            if positional.len() >= 2 {
+                let name = positional[0].to_string();
+                let command = positional[1..].join(" ");
+                if args.iter().any(|a| *a == "-a") {
+                    let _ = tx.send(CtrlReq::AppendHook(name, command));
+                } else {
+                    let _ = tx.send(CtrlReq::SetHook(name, command));
+                }
+            }
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "show-hooks" => {
+            let (rtx, rrx) = mpsc::channel::<String>();
+            let _ = tx.send(CtrlReq::ShowHooks(rtx));
+            if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
+                let _ = resp_tx.send(text);
+            }
+            true
+        }
+        "server-info" | "info" => {
+            let (rtx, rrx) = mpsc::channel::<String>();
+            let _ = tx.send(CtrlReq::ServerInfo(rtx));
+            if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
+                let _ = resp_tx.send(text);
+            }
+            true
+        }
+        "list-commands" | "lscm" => {
+            let (rtx, rrx) = mpsc::channel::<String>();
+            let _ = tx.send(CtrlReq::ListCommands(rtx));
+            if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
+                let _ = resp_tx.send(text);
+            }
+            true
+        }
+        "dump-state" => {
+            let (rtx, rrx) = mpsc::channel::<String>();
+            let _ = tx.send(CtrlReq::DumpState(rtx, false));
+            if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
+                let _ = resp_tx.send(text);
+            }
+            true
+        }
+        "zoom-pane" | "resizep -Z" => {
+            let _ = tx.send(CtrlReq::ZoomPane);
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "last-window" | "last" => {
+            let _ = tx.send(CtrlReq::LastWindow);
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "last-pane" | "lastp" => {
+            let _ = tx.send(CtrlReq::LastPane);
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "next-window" | "next" => {
+            let _ = tx.send(CtrlReq::NextWindow);
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "previous-window" | "prev" => {
+            let _ = tx.send(CtrlReq::PrevWindow);
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "rotate-window" | "rotatew" => {
+            let upward = args.iter().any(|a| *a == "-U");
+            let _ = tx.send(CtrlReq::RotateWindow(upward));
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "break-pane" | "breakp" => {
+            let _ = tx.send(CtrlReq::BreakPane);
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "respawn-pane" | "respawnp" => {
+            let _ = tx.send(CtrlReq::RespawnPane);
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "wait-for" | "wait" => {
+            let op = if args.iter().any(|a| *a == "-L") { WaitForOp::Lock }
+                     else if args.iter().any(|a| *a == "-U") { WaitForOp::Unlock }
+                     else if args.iter().any(|a| *a == "-S") { WaitForOp::Signal }
+                     else { WaitForOp::Wait };
+            if let Some(channel) = args.iter().find(|a| !a.starts_with('-')) {
+                let _ = tx.send(CtrlReq::WaitFor(channel.to_string(), op));
+            }
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        _ => {
+            // Unknown command
+            let _ = resp_tx.send(format!("unknown command: {}", cmd));
+            true
+        }
+    }
 }

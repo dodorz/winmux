@@ -494,6 +494,16 @@ pub fn mru_rank(mru: &[usize], pane_id: usize) -> usize {
     mru.iter().position(|&id| id == pane_id).unwrap_or(usize::MAX)
 }
 
+/// Visit every pane in a tree node (DFS order), calling `f` on each.
+pub fn for_each_pane(node: &Node, f: &mut dyn FnMut(&Pane)) {
+    match node {
+        Node::Leaf(p) => f(p),
+        Node::Split { children, .. } => {
+            for c in children { for_each_pane(c, f); }
+        }
+    }
+}
+
 /// Collect all pane IDs from a tree node (DFS order).
 pub fn collect_pane_ids(node: &Node) -> Vec<usize> {
     let mut ids = Vec::new();

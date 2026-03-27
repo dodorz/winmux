@@ -25,6 +25,7 @@ mod client;
 mod app;
 mod ssh_input;
 mod debug_log;
+mod control;
 
 use std::io::{self, Write, Read as _, BufRead as _, IsTerminal};
 use std::time::Duration;
@@ -70,11 +71,18 @@ fn run_main() -> io::Result<()> {
     // This avoids conflict with subcommand flags (e.g. select-pane -L, resize-pane -L).
     let mut l_socket_name: Option<String> = None;
     let mut f_config_file: Option<String> = None;
+    let mut control_mode: u8 = 0; // 0=off, 1=-C (echo), 2=-CC (no echo)
     {
         let mut i = 1; // skip binary name
         while i < args.len() {
             let arg = &args[i];
-            if arg == "-L" && i + 1 < args.len() {
+            if arg == "-CC" {
+                control_mode = 2;
+                i += 1;
+            } else if arg == "-C" {
+                control_mode = 1;
+                i += 1;
+            } else if arg == "-L" && i + 1 < args.len() {
                 l_socket_name = Some(args[i + 1].clone());
                 i += 2;
             } else if arg == "-f" && i + 1 < args.len() {
@@ -2388,6 +2396,14 @@ fn run_main() -> io::Result<()> {
     // Default behavior (bare `psmux` with no command):
     // tmux-compatible: always create a new session with the next available
     // numeric name (0, 1, 2, ...) and attach to it.
+
+    // Control mode: connect to server with CONTROL/CONTROL_NOECHO protocol
+    // instead of launching the TUI client. Must be checked before the
+    // is_terminal() gate since control mode reads from piped stdin.
+    if control_mode > 0 {
+        return run_control_mode(control_mode);
+    }
+
     //
     // If stdin is not a terminal (headless/non-interactive environment, e.g.
     // winget validation pipeline), print version and exit cleanly — starting
@@ -2560,4 +2576,109 @@ fn run_main() -> io::Result<()> {
     let _ = execute!(out, DisableBlinking, DisableMouseCapture, DisableBracketedPaste, LeaveAlternateScreen);
     let _ = terminal.show_cursor();
     result
+}
+
+/// Run as a control mode client (psmux -C or psmux -CC).
+/// Connects to the server via TCP, sends CONTROL/CONTROL_NOECHO,
+/// reads commands from stdin and prints responses/notifications to stdout.
+fn run_control_mode(mode: u8) -> io::Result<()> {
+    use std::net::TcpStream;
+
+    let session_name = env::var("PSMUX_SESSION_NAME")
+        .unwrap_or_else(|_| "default".to_string());
+    let home = env::var("USERPROFILE").or_else(|_| env::var("HOME"))
+        .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "no home directory"))?;
+    let psmux_dir = format!("{}\\.psmux", home);
+
+    // Read port and key
+    let port_path = format!("{}\\{}.port", psmux_dir, session_name);
+    let key_path = format!("{}\\{}.key", psmux_dir, session_name);
+
+    let port_str = std::fs::read_to_string(&port_path)
+        .map_err(|_| io::Error::new(io::ErrorKind::NotFound, format!("session '{}' not found (no port file)", session_name)))?;
+    let port: u16 = port_str.trim().parse()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "corrupted port file"))?;
+    let key = std::fs::read_to_string(&key_path)
+        .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "session key file not found"))?
+        .trim().to_string();
+
+    // Connect
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
+        .map_err(|e| io::Error::new(io::ErrorKind::ConnectionRefused, format!("cannot connect to session: {}", e)))?;
+    let _ = stream.set_nodelay(true);
+
+    // Auth
+    write!(stream, "AUTH {}\n", key)?;
+    stream.flush()?;
+
+    // Read OK response
+    let mut reader = io::BufReader::new(stream.try_clone()?);
+    let mut ok_line = String::new();
+    reader.read_line(&mut ok_line)?;
+    if !ok_line.trim().starts_with("OK") {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("auth failed: {}", ok_line.trim())));
+    }
+
+    // Send CONTROL or CONTROL_NOECHO
+    let mode_str = if mode == 1 { "CONTROL" } else { "CONTROL_NOECHO" };
+    let mut write_stream = reader.get_ref().try_clone()?;
+    write!(write_stream, "{}\n", mode_str)?;
+    write_stream.flush()?;
+
+    // Spawn a thread to read server responses/notifications and print to stdout
+    let reader_stream = reader.get_ref().try_clone()?;
+    let reader_thread = std::thread::spawn(move || {
+        let mut br = io::BufReader::new(reader_stream);
+        let mut line = String::new();
+        let stdout = io::stdout();
+        loop {
+            line.clear();
+            match br.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    let mut out = stdout.lock();
+                    let _ = out.write_all(line.as_bytes());
+                    let _ = out.flush();
+                }
+            }
+        }
+    });
+
+    // Read commands from stdin and send to server
+    let stdin = io::stdin();
+    let mut stdin_line = String::new();
+    loop {
+        stdin_line.clear();
+        match stdin.read_line(&mut stdin_line) {
+            Ok(0) => break, // EOF
+            Err(_) => break,
+            Ok(_) => {
+                if write!(write_stream, "{}", stdin_line).is_err() { break; }
+                if write_stream.flush().is_err() { break; }
+            }
+        }
+    }
+
+    // After stdin EOF, shut down the write side only so the server
+    // sees EOF and sends its final responses.  The reader thread
+    // keeps running until the server closes *its* side.
+    let _ = write_stream.shutdown(std::net::Shutdown::Write);
+
+    // Wait briefly for the reader thread to drain remaining responses,
+    // then forcibly close.  The server may take up to 5s (its read timeout)
+    // to notice the client is gone.
+    let handle = reader_thread;
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let done2 = done.clone();
+    std::thread::spawn(move || {
+        let _ = handle.join();
+        done2.store(true, std::sync::atomic::Ordering::Release);
+    });
+    // Drain for up to 2 seconds, then exit
+    for _ in 0..40 {
+        if done.load(std::sync::atomic::Ordering::Acquire) { break; }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    Ok(())
 }

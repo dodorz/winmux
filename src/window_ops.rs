@@ -1014,7 +1014,9 @@ pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn porta
     let bell_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let bell_writer = bell_pending.clone();
     
-    crate::pane::spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer);
+    let output_ring = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    crate::pane::spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, output_ring.clone());
+    pane.output_ring = output_ring;
     
     let mut pty_writer = pair.master.take_writer().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?;
     crate::pane::conpty_preemptive_dsr_response(&mut *pty_writer);

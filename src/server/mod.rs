@@ -38,6 +38,7 @@ use crate::config::{load_config, parse_key_string, format_key_binding, normalize
     parse_config_content};
 use crate::commands::{parse_command_to_action, format_action, parse_menu_definition, execute_command_string};
 use crate::util::{list_windows_json, list_tree_json, list_windows_tmux, base64_encode};
+use crate::control;
 use crate::format::{expand_format, format_list_windows, format_list_panes, set_buffer_idx_override};
 use crate::help;
 
@@ -562,6 +563,23 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         let data_ready = crate::types::PTY_DATA_READY.swap(false, std::sync::atomic::Ordering::AcqRel);
         if data_ready {
             state_dirty = true;
+            // Drain output ring buffers and send %output notifications to control clients
+            if !app.control_clients.is_empty() {
+                for win in &app.windows {
+                    crate::tree::for_each_pane(&win.root, &mut |pane: &crate::types::Pane| {
+                        if let Ok(mut ring) = pane.output_ring.lock() {
+                            if !ring.is_empty() {
+                                let bytes: Vec<u8> = ring.drain(..).collect();
+                                let data = String::from_utf8_lossy(&bytes).to_string();
+                                control::emit_notification(&app, crate::types::ControlNotification::Output {
+                                    pane_id: pane.id,
+                                    data,
+                                });
+                            }
+                        }
+                    });
+                }
+            }
         }
         // When a popup PTY is active, always push frames so interactive
         // content (e.g. fzf, shell prompts) updates in real-time.
@@ -2961,6 +2979,18 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     };
                     state_dirty = true;
                 }
+                CtrlReq::ControlRegister { client_id, echo, notif_tx } => {
+                    app.control_clients.insert(client_id, crate::types::ControlClient {
+                        client_id,
+                        cmd_counter: 0,
+                        echo_enabled: echo,
+                        notification_tx: notif_tx,
+                        paused_panes: std::collections::HashSet::new(),
+                    });
+                }
+                CtrlReq::ControlDeregister { client_id } => {
+                    app.control_clients.remove(&client_id);
+                }
             }
             // Log any active_idx change for debugging window-switch issues
             if app.active_idx != _prev_active_idx && crate::debug_log::server_log_enabled() {
@@ -2974,6 +3004,57 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 let cmds: Vec<String> = app.hooks.get(event).cloned().unwrap_or_default();
                 for cmd in cmds {
                     let _ = execute_command_string(&mut app, &cmd);
+                }
+                // Emit control mode notifications for hook events
+                if !app.control_clients.is_empty() {
+                    let active_win = &app.windows[app.active_idx];
+                    let win_id = active_win.id;
+                    let active_pane_id = get_active_pane_id(&active_win.root, &active_win.active_path).unwrap_or(0);
+                    match event {
+                        "after-new-window" => {
+                            control::emit_notification(&app, crate::types::ControlNotification::WindowAdd { window_id: win_id });
+                        }
+                        "after-kill-pane" | "window-closed" => {
+                            control::emit_notification(&app, crate::types::ControlNotification::WindowClose { window_id: win_id });
+                        }
+                        "after-rename-window" => {
+                            let name = active_win.name.clone();
+                            control::emit_notification(&app, crate::types::ControlNotification::WindowRenamed { window_id: win_id, name });
+                        }
+                        "after-select-window" => {
+                            control::emit_notification(&app, crate::types::ControlNotification::SessionWindowChanged {
+                                session_id: app.session_id, window_id: win_id,
+                            });
+                        }
+                        "after-select-pane" => {
+                            control::emit_notification(&app, crate::types::ControlNotification::WindowPaneChanged {
+                                window_id: win_id, pane_id: active_pane_id,
+                            });
+                        }
+                        "after-rename-session" => {
+                            let name = app.session_name.clone();
+                            control::emit_notification(&app, crate::types::ControlNotification::SessionRenamed { name });
+                        }
+                        "client-attached" => {
+                            let name = app.session_name.clone();
+                            control::emit_notification(&app, crate::types::ControlNotification::SessionChanged {
+                                session_id: app.session_id, name,
+                            });
+                        }
+                        "client-detached" => {
+                            control::emit_notification(&app, crate::types::ControlNotification::ClientDetached {
+                                client: "client".to_string(),
+                            });
+                        }
+                        "after-split-window" | "after-resize-pane" | "after-break-pane"
+                        | "after-join-pane" | "after-rotate-window" | "after-swap-pane" => {
+                            control::emit_notification(&app, crate::types::ControlNotification::LayoutChange {
+                                window_id: win_id,
+                                layout: format!("{}x{}", app.last_window_area.width, app.last_window_area.height),
+                            });
+                        }
+                        _ => {}
+                    }
                 }
                 // Check if the hook itself changed active_idx
                 if app.active_idx != _pre_hook_idx && crate::debug_log::server_log_enabled() {

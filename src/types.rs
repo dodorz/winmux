@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use portable_pty::MasterPty;
@@ -7,6 +8,39 @@ use ratatui::prelude::Rect;
 use chrono::Local;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Notifications emitted to control mode clients (tmux wire-compatible).
+#[derive(Clone, Debug)]
+pub enum ControlNotification {
+    Output { pane_id: usize, data: String },
+    WindowAdd { window_id: usize },
+    WindowClose { window_id: usize },
+    WindowRenamed { window_id: usize, name: String },
+    WindowPaneChanged { window_id: usize, pane_id: usize },
+    LayoutChange { window_id: usize, layout: String },
+    SessionChanged { session_id: usize, name: String },
+    SessionRenamed { name: String },
+    SessionWindowChanged { session_id: usize, window_id: usize },
+    SessionsChanged,
+    PaneModeChanged { pane_id: usize },
+    ClientDetached { client: String },
+    Continue { pane_id: usize },
+    Pause { pane_id: usize },
+    Exit { reason: Option<String> },
+    PasteBufferChanged { name: String },
+    PasteBufferDeleted { name: String },
+    ClientSessionChanged { client: String, session_id: usize, name: String },
+    Message { text: String },
+}
+
+/// Per-connection control mode client state.
+pub struct ControlClient {
+    pub client_id: u64,
+    pub cmd_counter: u64,
+    pub echo_enabled: bool,
+    pub notification_tx: mpsc::SyncSender<ControlNotification>,
+    pub paused_panes: HashSet<usize>,
+}
 
 pub struct Pane {
     pub master: Box<dyn MasterPty>,
@@ -61,6 +95,9 @@ pub struct Pane {
     /// the deadline passes.  Used to hide injected cd+cls commands during
     /// warm session claiming so the user never sees a flash.
     pub squelch_until: Option<Instant>,
+    /// Per-pane output ring buffer for control mode %output notifications.
+    /// Filled by the PTY reader thread, drained by the server loop.
+    pub output_ring: Arc<Mutex<VecDeque<u8>>>,
 }
 
 /// Pre-spawned shell ready to be transplanted into a new window instantly.
@@ -79,6 +116,7 @@ pub struct WarmPane {
     pub pane_id: usize,
     pub rows: u16,
     pub cols: u16,
+    pub output_ring: Arc<Mutex<VecDeque<u8>>>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -485,6 +523,8 @@ pub struct AppState {
     /// Plugin .ps1 scripts queued during config loading for post-startup execution.
     /// These need the server to be running (TCP listener) before they can apply.
     pub pending_plugin_scripts: Vec<String>,
+    /// Connected control mode clients (keyed by client_id).
+    pub control_clients: HashMap<u64, ControlClient>,
 }
 
 impl AppState {
@@ -632,6 +672,7 @@ impl AppState {
             warm_enabled: std::env::var("PSMUX_NO_WARM").map(|v| v != "1" && v != "true").unwrap_or(true),
             warm_pane: None,
             pending_plugin_scripts: Vec::new(),
+            control_clients: HashMap::new(),
         }
     }
 
@@ -848,6 +889,16 @@ pub enum CtrlReq {
     /// Show static text in a popup overlay (title, content).
     /// Used by the persistent client command prompt for list-* commands.
     ShowTextPopup(String, String),
+    /// Register a control mode client.
+    ControlRegister {
+        client_id: u64,
+        echo: bool,
+        notif_tx: mpsc::SyncSender<ControlNotification>,
+    },
+    /// Deregister a control mode client.
+    ControlDeregister {
+        client_id: u64,
+    },
 }
 
 /// Global flag set by PTY reader threads when new output arrives.
@@ -910,6 +961,14 @@ pub fn push_frame(frame: &str) {
 /// Check if any persistent clients are registered for push.
 pub fn has_frame_receivers() -> bool {
     FRAME_PUSH_SENDERS.lock().map_or(false, |v| !v.is_empty())
+}
+
+/// Global counter for control mode client IDs.
+static NEXT_CONTROL_CLIENT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Allocate a unique control mode client ID.
+pub fn next_control_client_id() -> u64 {
+    NEXT_CONTROL_CLIENT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Wait-for operation types
