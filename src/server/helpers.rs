@@ -184,8 +184,10 @@ pub(crate) fn check_window_activity(app: &mut AppState) -> Vec<&'static str> {
 
         // ── Activity detection ──
         if i == active {
-            // Active window: clear activity flag, update version
+            // Active window: clear activity/bell/silence flags, update version
             win.activity_flag = false;
+            win.bell_flag = false;
+            win.silence_flag = false;
             win.last_seen_version = window_data_version(win);
             // Update last_output_time for active window too
             let cur = window_data_version(win);
