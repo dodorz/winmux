@@ -455,12 +455,17 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             let needs_env = app.environment.iter().any(|(k, _)| {
                 !k.starts_with("PSMUX_TARGET_SESSION") && k != "TMUX" && k != "TMUX_PANE"
             });
-            if needs_env {
+            // The early warm pane was spawned before load_config with
+            // allow_predictions=false (the default).  If the config set
+            // allow-predictions on, the warm pane has the wrong PSReadLine
+            // init string (PSRL_FIX instead of PSRL_CRASH_GUARD), so it
+            // must be respawned (#165).
+            let needs_predictions_fix = app.allow_predictions;
+            if needs_env || needs_predictions_fix {
                 // The early warm pane was spawned before config, so it lacks
-                // config-defined env vars (e.g. TERM from default-terminal).
-                // Kill it and respawn with env vars set at the process level
-                // via CommandBuilder::env() — this avoids writing PowerShell
-                // commands to the PTY which would echo visibly (#137).
+                // config-defined env vars (e.g. TERM from default-terminal)
+                // or has the wrong PSReadLine prediction init (#165).
+                // Kill it and respawn with the correct settings.
                 let mut wp = wp;
                 wp.child.kill().ok();
                 match spawn_warm_pane(&*pty_system, &mut app) {
@@ -2421,6 +2426,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         "prediction-dimming {}\n",
                         if app.prediction_dimming { "on" } else { "off" }
                     ));
+                    output.push_str(&format!("allow-predictions {}\n", if app.allow_predictions { "on" } else { "off" }));
                     output.push_str(&format!("cursor-style {}\n", std::env::var("PSMUX_CURSOR_STYLE").unwrap_or_else(|_| "bar".to_string())));
                     output.push_str(&format!("cursor-blink {}\n", if std::env::var("PSMUX_CURSOR_BLINK").unwrap_or_else(|_| "1".to_string()) != "0" { "on" } else { "off" }));
                     if !app.default_shell.is_empty() {

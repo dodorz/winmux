@@ -1027,6 +1027,10 @@ mod test_issue151_strict_mode;
 mod test_issue155_output_rendering;
 
 #[cfg(test)]
+#[path = "../tests-rs/test_issue165_prediction_view_style.rs"]
+mod test_issue165_prediction_view_style;
+
+#[cfg(test)]
 mod test_parser_audible_bell {
     /// Helper: create a parser, process bytes, return whether bell rang.
     fn bell_after(data: &[u8]) -> bool {
