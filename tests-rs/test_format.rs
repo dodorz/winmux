@@ -565,3 +565,48 @@ fn test_session_format_alias() {
     app.attached_clients = 2;
     assert_eq!(expand_var("session_format", &app, 0), "1");
 }
+
+// ── Issue #164: expand_format must preserve #[style] directives ──
+
+#[test]
+fn test_expand_format_preserves_style_directives() {
+    let app = mock_app();
+    // #[fg=red] should pass through expand_format unchanged
+    let result = expand_format("#[fg=red]Custom Line 2", &app);
+    assert_eq!(result, "#[fg=red]Custom Line 2",
+        "expand_format must not eat #[fg=red] directive");
+}
+
+#[test]
+fn test_expand_format_preserves_align_directive() {
+    let app = mock_app();
+    let result = expand_format("#[align=left]Custom Line 1", &app);
+    assert_eq!(result, "#[align=left]Custom Line 1",
+        "expand_format must not eat #[align=left] directive");
+}
+
+#[test]
+fn test_expand_format_mixed_variables_and_styles() {
+    let mut app = mock_app();
+    app.session_name = "main".to_string();
+    // Mix of style directive and variable expansion
+    let result = expand_format("#[fg=red]session: #S", &app);
+    assert_eq!(result, "#[fg=red]session: main",
+        "Style directives preserved and variables expanded");
+}
+
+#[test]
+fn test_expand_format_multiple_style_blocks() {
+    let app = mock_app();
+    let result = expand_format("#[fg=red]Hello #[fg=green]World", &app);
+    assert_eq!(result, "#[fg=red]Hello #[fg=green]World",
+        "Multiple style blocks must all be preserved");
+}
+
+#[test]
+fn test_expand_format_complex_style() {
+    let app = mock_app();
+    let result = expand_format("#[fg=yellow,bg=blue,bold]Styled Text", &app);
+    assert_eq!(result, "#[fg=yellow,bg=blue,bold]Styled Text",
+        "Complex style directives must be preserved");
+}
