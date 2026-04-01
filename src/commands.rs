@@ -1419,8 +1419,9 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
             // Parse with quote-aware parser to handle nested quotes properly
             let args = parse_command_line(cmd);
             let mut cmd_parts: Vec<&str> = Vec::new();
+            let mut background = false;
             for arg in &args[1..] {
-                if arg == "-b" { /* always spawn non-blocking */ }
+                if arg == "-b" { background = true; }
                 else { cmd_parts.push(arg); }
             }
             let shell_cmd = cmd_parts.join(" ");
@@ -1429,23 +1430,60 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
                 let shell_cmd = crate::util::expand_run_shell_path(&shell_cmd);
                 // Set PSMUX_TARGET_SESSION so child scripts connect to the correct server
                 let target_session = app.port_file_base();
-                #[cfg(windows)]
-                {
-                    let mut c = std::process::Command::new("pwsh");
-                    c.args(["-NoProfile", "-Command", &shell_cmd]);
-                    if !target_session.is_empty() {
-                        c.env("PSMUX_TARGET_SESSION", &target_session);
+
+                if background {
+                    // -b flag: fire and forget, no output capture
+                    #[cfg(windows)]
+                    {
+                        let mut c = std::process::Command::new("pwsh");
+                        c.args(["-NoProfile", "-Command", &shell_cmd]);
+                        if !target_session.is_empty() {
+                            c.env("PSMUX_TARGET_SESSION", &target_session);
+                        }
+                        let _ = c.spawn();
                     }
-                    let _ = c.spawn();
-                }
-                #[cfg(not(windows))]
-                {
-                    let mut c = std::process::Command::new("sh");
-                    c.args(["-c", &shell_cmd]);
-                    if !target_session.is_empty() {
-                        c.env("PSMUX_TARGET_SESSION", &target_session);
+                    #[cfg(not(windows))]
+                    {
+                        let mut c = std::process::Command::new("sh");
+                        c.args(["-c", &shell_cmd]);
+                        if !target_session.is_empty() {
+                            c.env("PSMUX_TARGET_SESSION", &target_session);
+                        }
+                        let _ = c.spawn();
                     }
-                    let _ = c.spawn();
+                } else {
+                    // No -b: capture output and display in popup
+                    #[cfg(windows)]
+                    let result = {
+                        let mut c = std::process::Command::new("pwsh");
+                        c.args(["-NoProfile", "-Command", &shell_cmd]);
+                        if !target_session.is_empty() {
+                            c.env("PSMUX_TARGET_SESSION", &target_session);
+                        }
+                        c.output()
+                    };
+                    #[cfg(not(windows))]
+                    let result = {
+                        let mut c = std::process::Command::new("sh");
+                        c.args(["-c", &shell_cmd]);
+                        if !target_session.is_empty() {
+                            c.env("PSMUX_TARGET_SESSION", &target_session);
+                        }
+                        c.output()
+                    };
+                    if let Ok(output) = result {
+                        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        if !stderr.is_empty() {
+                            if !text.is_empty() && !text.ends_with('\n') {
+                                text.push('\n');
+                            }
+                            text.push_str(&stderr);
+                        }
+                        if !text.is_empty() {
+                            show_output_popup(app, "run-shell", text);
+                        }
+                    }
                 }
             }
         }

@@ -1596,6 +1596,127 @@ fn window_index_prompt_accepts_digits_only() {
     }
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+//  Issue #170: run-shell output display
+// ════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn run_shell_captures_and_displays_output() {
+    let mut app = mock_app();
+    // Use a simple echo command that produces stdout
+    #[cfg(windows)]
+    let cmd = r#"run-shell "Write-Output 'hello-from-run-shell'""#;
+    #[cfg(not(windows))]
+    let cmd = r#"run-shell "echo hello-from-run-shell""#;
+
+    let _ = execute_command_string(&mut app, cmd);
+
+    match &app.mode {
+        Mode::PopupMode { command, output, .. } => {
+            assert_eq!(command, "run-shell");
+            assert!(
+                output.contains("hello-from-run-shell"),
+                "run-shell output should contain the echoed text, got: {}",
+                output
+            );
+        }
+        other => panic!(
+            "expected PopupMode with captured output, got {:?}",
+            std::mem::discriminant(other)
+        ),
+    }
+}
+
+#[test]
+fn run_shell_background_does_not_show_popup() {
+    let mut app = mock_app();
+    // With -b flag: should NOT enter PopupMode
+    #[cfg(windows)]
+    let cmd = r#"run-shell -b "Write-Output 'background-test'""#;
+    #[cfg(not(windows))]
+    let cmd = r#"run-shell -b "echo background-test""#;
+
+    let _ = execute_command_string(&mut app, cmd);
+
+    assert!(
+        !matches!(app.mode, Mode::PopupMode { .. }),
+        "run-shell -b should NOT produce a popup, mode = {:?}",
+        std::mem::discriminant(&app.mode)
+    );
+}
+
+#[test]
+fn run_shell_alias_captures_output() {
+    let mut app = mock_app();
+    // "run" is the short alias for "run-shell"
+    #[cfg(windows)]
+    let cmd = r#"run "Write-Output 'alias-test'""#;
+    #[cfg(not(windows))]
+    let cmd = r#"run "echo alias-test""#;
+
+    let _ = execute_command_string(&mut app, cmd);
+
+    match &app.mode {
+        Mode::PopupMode { output, .. } => {
+            assert!(
+                output.contains("alias-test"),
+                "run alias should also capture output, got: {}",
+                output
+            );
+        }
+        other => panic!(
+            "expected PopupMode from 'run' alias, got {:?}",
+            std::mem::discriminant(other)
+        ),
+    }
+}
+
+#[test]
+fn run_shell_stderr_is_captured() {
+    let mut app = mock_app();
+    // Use a command that writes to stderr
+    #[cfg(windows)]
+    let cmd = r#"run-shell "Write-Error 'error-output' 2>&1""#;
+    #[cfg(not(windows))]
+    let cmd = r#"run-shell "echo error-output >&2""#;
+
+    let _ = execute_command_string(&mut app, cmd);
+
+    match &app.mode {
+        Mode::PopupMode { output, .. } => {
+            assert!(
+                output.contains("error-output") || output.contains("error"),
+                "run-shell should capture stderr, got: {}",
+                output
+            );
+        }
+        other => panic!(
+            "expected PopupMode with stderr captured, got {:?}",
+            std::mem::discriminant(other)
+        ),
+    }
+}
+
+#[test]
+fn run_shell_empty_output_no_popup() {
+    let mut app = mock_app();
+    // A command that produces no output should not show a popup
+    #[cfg(windows)]
+    let cmd = r#"run-shell "Write-Output ''""#;
+    #[cfg(not(windows))]
+    let cmd = r#"run-shell "true""#;
+
+    let _ = execute_command_string(&mut app, cmd);
+
+    // On Windows, Write-Output '' produces a newline, so a popup may appear
+    // On Unix, `true` produces no output, so no popup
+    #[cfg(not(windows))]
+    assert!(
+        !matches!(app.mode, Mode::PopupMode { .. }),
+        "run-shell with no output should not produce a popup"
+    );
+}
+
 #[test]
 fn window_index_prompt_backspace_removes_digit() {
     let mut app = mock_app_with_windows(&["w0", "w1"]);
