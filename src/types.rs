@@ -388,6 +388,11 @@ pub struct AppState {
     pub control_rx: Option<mpsc::Receiver<CtrlReq>>,
     pub control_port: Option<u16>,
     pub session_key: String,
+    /// Receiver for async run-shell results (title, output).
+    /// Commands are spawned in background threads and results polled each frame.
+    pub run_shell_rx: Option<mpsc::Receiver<(String, String)>>,
+    /// Sender cloned into each run-shell background thread.
+    pub run_shell_tx: Option<mpsc::Sender<(String, String)>>,
     pub session_name: String,
     /// Numeric session ID (tmux-compatible: $0, $1, $2...).
     pub session_id: usize,
@@ -640,6 +645,8 @@ impl AppState {
             control_rx: None,
             control_port: None,
             session_key: String::new(),
+            run_shell_rx: None,
+            run_shell_tx: None,
             session_name,
             session_id: {
                 static NEXT_SESSION_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);

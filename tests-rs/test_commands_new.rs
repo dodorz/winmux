@@ -1611,20 +1611,17 @@ fn run_shell_captures_and_displays_output() {
 
     let _ = execute_command_string(&mut app, cmd);
 
-    match &app.mode {
-        Mode::PopupMode { command, output, .. } => {
-            assert_eq!(command, "run-shell");
-            assert!(
-                output.contains("hello-from-run-shell"),
-                "run-shell output should contain the echoed text, got: {}",
-                output
-            );
-        }
-        other => panic!(
-            "expected PopupMode with captured output, got {:?}",
-            std::mem::discriminant(other)
-        ),
-    }
+    // run-shell is now async: the command runs in a background thread
+    // and sends output via run_shell_rx. We need to recv the result.
+    let rx = app.run_shell_rx.as_ref().expect("run_shell_rx should be created");
+    let (title, text) = rx.recv_timeout(std::time::Duration::from_secs(10))
+        .expect("should receive run-shell output within 10s");
+    assert_eq!(title, "run-shell");
+    assert!(
+        text.contains("hello-from-run-shell"),
+        "run-shell output should contain the echoed text, got: {}",
+        text
+    );
 }
 
 #[test]
@@ -1656,19 +1653,14 @@ fn run_shell_alias_captures_output() {
 
     let _ = execute_command_string(&mut app, cmd);
 
-    match &app.mode {
-        Mode::PopupMode { output, .. } => {
-            assert!(
-                output.contains("alias-test"),
-                "run alias should also capture output, got: {}",
-                output
-            );
-        }
-        other => panic!(
-            "expected PopupMode from 'run' alias, got {:?}",
-            std::mem::discriminant(other)
-        ),
-    }
+    let rx = app.run_shell_rx.as_ref().expect("run_shell_rx should be created");
+    let (_title, text) = rx.recv_timeout(std::time::Duration::from_secs(10))
+        .expect("should receive run alias output within 10s");
+    assert!(
+        text.contains("alias-test"),
+        "run alias should also capture output, got: {}",
+        text
+    );
 }
 
 #[test]
@@ -1682,19 +1674,14 @@ fn run_shell_stderr_is_captured() {
 
     let _ = execute_command_string(&mut app, cmd);
 
-    match &app.mode {
-        Mode::PopupMode { output, .. } => {
-            assert!(
-                output.contains("error-output") || output.contains("error"),
-                "run-shell should capture stderr, got: {}",
-                output
-            );
-        }
-        other => panic!(
-            "expected PopupMode with stderr captured, got {:?}",
-            std::mem::discriminant(other)
-        ),
-    }
+    let rx = app.run_shell_rx.as_ref().expect("run_shell_rx should be created");
+    let (_title, text) = rx.recv_timeout(std::time::Duration::from_secs(10))
+        .expect("should receive run-shell stderr output within 10s");
+    assert!(
+        text.contains("error-output") || text.contains("error"),
+        "run-shell should capture stderr, got: {}",
+        text
+    );
 }
 
 #[test]

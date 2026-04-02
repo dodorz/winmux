@@ -1492,35 +1492,53 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
                     }
                     let _ = c.spawn();
                 } else {
-                    // No -b: capture output and display in popup
-                    let mut c = std::process::Command::new(&shell_prog);
-                    for a in &shell_args { c.arg(a); }
-                    c.arg(&shell_cmd);
-                    if !target_session.is_empty() {
-                        c.env("PSMUX_TARGET_SESSION", &target_session);
+                    // No -b: spawn async to avoid blocking the UI thread.
+                    // Interactive commands (htop, vim, etc.) would freeze psmux
+                    // if we used synchronous .output() on the main thread.
+                    // Lazily create the channel pair on first use.
+                    if app.run_shell_tx.is_none() {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        app.run_shell_tx = Some(tx);
+                        app.run_shell_rx = Some(rx);
                     }
-                    let result = c.output();
-                    match result {
-                        Ok(output) => {
-                            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            if !stderr.is_empty() {
-                                if !text.is_empty() && !text.ends_with('\n') {
-                                    text.push('\n');
+                    let tx = app.run_shell_tx.as_ref().unwrap().clone();
+                    let shell_prog = shell_prog.clone();
+                    let shell_args = shell_args.clone();
+                    let shell_cmd = shell_cmd.clone();
+                    let shell_cmd_display = shell_cmd.clone();
+                    let target_session = target_session.clone();
+                    std::thread::spawn(move || {
+                        let mut c = std::process::Command::new(&shell_prog);
+                        for a in &shell_args { c.arg(a); }
+                        c.arg(&shell_cmd);
+                        if !target_session.is_empty() {
+                            c.env("PSMUX_TARGET_SESSION", &target_session);
+                        }
+                        // Detach stdin so interactive programs exit immediately
+                        c.stdin(std::process::Stdio::null());
+                        match c.output() {
+                            Ok(output) => {
+                                let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+                                let stderr = String::from_utf8_lossy(&output.stderr);
+                                if !stderr.is_empty() {
+                                    if !text.is_empty() && !text.ends_with('\n') {
+                                        text.push('\n');
+                                    }
+                                    text.push_str(&stderr);
                                 }
-                                text.push_str(&stderr);
+                                // Send result back; empty output is also sent so
+                                // the status message "running..." can be cleared.
+                                let _ = tx.send(("run-shell".to_string(), text));
                             }
-                            if !text.is_empty() {
-                                show_output_popup(app, "run-shell", text);
+                            Err(e) => {
+                                let _ = tx.send(("run-shell".to_string(), format!("run-shell: {}", e)));
                             }
                         }
-                        Err(e) => {
-                            app.status_message = Some((
-                                format!("run-shell: {}", e),
-                                Instant::now(),
-                            ));
-                        }
-                    }
+                    });
+                    app.status_message = Some((
+                        format!("running: {}", shell_cmd_display),
+                        Instant::now(),
+                    ));
                 }
             }
         }
