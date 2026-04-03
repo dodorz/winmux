@@ -546,7 +546,6 @@ pub fn apply_user_environment(builder: &mut CommandBuilder, environment: &std::c
 
 /// PowerShell env shim snippet — defines a `Global:env` function that translates
 /// POSIX `env VAR=val ... command args` invocations into PowerShell equivalents.
-/// Only defined when no native `env.exe` is found on PATH.
 ///
 /// Key design decisions for Windows + Claude Code agent teams compatibility:
 ///   1. POSIX backslash-escape removal uses `\\([^\w\\])` so that escapes like
@@ -558,8 +557,12 @@ pub fn apply_user_environment(builder: &mut CommandBuilder, environment: &std::c
 ///   3. `.js` / `.mjs` files are detected and automatically executed via
 ///      `node` because Windows associates `.js` with WScript.exe (WSH),
 ///      which cannot run Node.js code and instead shows error dialogs.
+///   4. The shim is **always** installed (even when a native env.exe exists
+///      on PATH) because Claude Code's shell-quote library produces POSIX
+///      escapes (`\@`, `\:`) that native env.exe does not strip, causing
+///      agent ID mismatches and spawn failures (psmux#172, #173, #180).
+///      Users who need the raw env.exe can invoke it as `env.exe` explicitly.
 const ENV_SHIM_PS: &str = concat!(
-    "if(-not(Get-Command env -EA 0 -Type Application)){ ",
     "function Global:env { ",
     // _pu: POSIX-unescape helper — strips `\` before non-word, non-backslash
     // chars (e.g. \@ → @, \: → :) produced by npm shell-quote.
@@ -598,7 +601,7 @@ const ENV_SHIM_PS: &str = concat!(
     "else{& $cmd @rest} ",
     "} elseif($v.Count -gt 0){ ",
     "foreach($e in $v.GetEnumerator()){[Environment]::SetEnvironmentVariable($e.Key,$e.Value,'Process')} ",
-    "} else { Get-ChildItem Env:|ForEach-Object{$_.Name+'='+$_.Value} } } }; ",
+    "} else { Get-ChildItem Env:|ForEach-Object{$_.Name+'='+$_.Value} } }; ",
     // Claude Code teammate-mode wrapper (claude-code#26244):
     // The standalone (Bun SFE) binary ignores `teammateMode` from settings.json
     // but honours the `--teammate-mode tmux` CLI flag.  The agent teams tool-set
