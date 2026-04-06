@@ -586,6 +586,17 @@ pub fn find_window_index_by_id(app: &AppState, wid: usize) -> Option<usize> {
 }
 
 pub fn focus_pane_by_id(app: &mut AppState, pid: usize) {
+    focus_pane_by_id_inner(app, pid, true);
+}
+
+/// Like `focus_pane_by_id` but does NOT update MRU.
+/// Used for temporary -t targeting where the focus change is transient
+/// and should not pollute the recency list (#71).
+pub fn focus_pane_by_id_no_mru(app: &mut AppState, pid: usize) {
+    focus_pane_by_id_inner(app, pid, false);
+}
+
+fn focus_pane_by_id_inner(app: &mut AppState, pid: usize, update_mru: bool) {
     fn rec(node: &Node, path: &mut Vec<usize>, found: &mut Option<Vec<usize>>, pid: usize) {
         match node {
             Node::Leaf(p) => { if p.id == pid { *found = Some(path.clone()); } }
@@ -598,7 +609,7 @@ pub fn focus_pane_by_id(app: &mut AppState, pid: usize) {
         let mut path = Vec::new();
         let mut found = None;
         rec(&w.root, &mut path, &mut found, pid);
-        if let Some(p) = found { app.active_idx = wi; let win = &mut app.windows[wi]; win.active_path = p; touch_mru(&mut win.pane_mru, pid); return; }
+        if let Some(p) = found { app.active_idx = wi; let win = &mut app.windows[wi]; win.active_path = p; if update_mru { touch_mru(&mut win.pane_mru, pid); } return; }
     }
 }
 

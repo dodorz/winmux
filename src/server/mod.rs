@@ -18,7 +18,7 @@ use crate::types::{AppState, CtrlReq, Mode, FocusDir, LayoutKind, PipePaneState,
 use crate::platform::install_console_ctrl_handler;
 use crate::pane::{create_window, create_window_raw, split_active_with_command, kill_active_pane, kill_pane_by_id, spawn_warm_pane};
 use crate::tree::{self, active_pane, active_pane_mut, resize_all_panes, kill_all_children,
-    find_window_index_by_id, focus_pane_by_id, focus_pane_by_index, get_active_pane_id,
+    find_window_index_by_id, focus_pane_by_id, focus_pane_by_id_no_mru, focus_pane_by_index, get_active_pane_id,
     get_split_mut, path_exists};
 
 use helpers::{collect_pane_paths_server, serialize_bindings_json, json_escape_string,
@@ -1023,7 +1023,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         ).unwrap_or(usize::MAX);
                         temp_focus_restore = Some((app.active_idx, pane_id));
                     }
-                    focus_pane_by_id(&mut app, pid);
+                    // Use no-MRU variant: temporary -t targeting should not
+                    // pollute the recency list (#71 — split-window -t was
+                    // incorrectly touching the target pane's MRU rank).
+                    focus_pane_by_id_no_mru(&mut app, pid);
                 }
                 CtrlReq::FocusPaneByIndexTemp(idx) => {
                     if temp_focus_restore.is_none() {

@@ -429,6 +429,8 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
 fn kill_pane_at_path(win: &mut Window, path: &Vec<usize>) {
     // Get the ID of the pane being killed (for MRU removal)
     let killed_id = crate::tree::get_active_pane_id(&win.root, path);
+    // Collect ordered pane IDs before kill for prev-by-index fallback (#71).
+    let ordered_ids_before = crate::tree::collect_pane_ids(&win.root);
     // Explicitly kill the target pane's process tree FIRST.
     // remove_node() doesn't call kill_node() when the root is a single Leaf,
     // so we must do it here to ensure no orphaned processes.
@@ -444,8 +446,26 @@ fn kill_pane_at_path(win: &mut Window, path: &Vec<usize>) {
     // Walk the MRU list and pick the first pane that still exists.
     let mru_target = win.pane_mru.iter()
         .find_map(|&id| crate::tree::find_path_by_id(&win.root, id));
-    win.active_path = mru_target
-        .unwrap_or_else(|| crate::tree::first_leaf_path(&win.root));
+    // Fallback when MRU is empty (all remaining panes unvisited):
+    // tmux picks previous pane by pane_index, or next if no previous.
+    let fallback = || {
+        if let Some(kid) = killed_id {
+            let pos = ordered_ids_before.iter().position(|&id| id == kid);
+            if let Some(pos) = pos {
+                // Try previous by index first, then next
+                let prev_id = if pos > 0 { Some(ordered_ids_before[pos - 1]) } else { None };
+                let next_id = ordered_ids_before.get(pos + 1).copied();
+                let candidate = prev_id.or(next_id);
+                if let Some(cid) = candidate {
+                    if let Some(path) = crate::tree::find_path_by_id(&win.root, cid) {
+                        return path;
+                    }
+                }
+            }
+        }
+        crate::tree::first_leaf_path(&win.root)
+    };
+    win.active_path = mru_target.unwrap_or_else(fallback);
 }
 
 pub fn kill_active_pane(app: &mut AppState) -> io::Result<()> {

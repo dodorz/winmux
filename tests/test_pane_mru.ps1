@@ -278,6 +278,156 @@ psmux kill-session -t "mru5" 2>$null
 Kill-All
 
 ###############################################################################
+# TEST 6: split-window -t does NOT pollute MRU (issue #71 remaining)
+#
+# spooki44's repro: split-window -t touches the target pane's MRU,
+# causing kill-pane to pick the wrong next pane.
+###############################################################################
+Write-Host "`n--- TEST 6: split-window -t does NOT pollute MRU ---" -ForegroundColor Yellow
+Kill-All
+
+psmux new-session -d -s "mru6" -x 120 -y 40 2>$null
+Start-Sleep -Seconds 2
+
+# psmux split-window -h -t 0:0.0  →  panes: %1 (left), %2 (right, active)
+psmux split-window -h -t "mru6:0.0" 2>$null
+Start-Sleep -Milliseconds 800
+
+$id2_6 = Get-ActivePaneId "mru6"
+Write-Host "  After h-split, active (right): $id2_6" -ForegroundColor Gray
+
+# psmux split-window -v -t 0:0.0  →  splits left pane, new pane active
+psmux split-window -v -t "mru6:0.0" 2>$null
+Start-Sleep -Milliseconds 800
+
+$id3_6 = Get-ActivePaneId "mru6"
+Write-Host "  After v-split targeting left, active (new): $id3_6" -ForegroundColor Gray
+
+# Kill active pane  →  expected: focus %2, NOT %1
+psmux kill-pane -t "mru6" 2>$null
+Start-Sleep -Milliseconds 800
+
+$result6 = Get-ActivePaneId "mru6"
+Write-Host "  After kill, active: $result6" -ForegroundColor Gray
+Report "split-window -t does not pollute MRU" ($result6 -eq $id2_6) "expected=$id2_6 got=$result6"
+
+psmux kill-session -t "mru6" 2>$null
+Start-Sleep -Milliseconds 500
+
+###############################################################################
+# TEST 7: split-window -t %ID does NOT pollute MRU (pane ID targeting)
+###############################################################################
+Write-Host "`n--- TEST 7: split-window -t %%ID no MRU pollution ---" -ForegroundColor Yellow
+Kill-All
+
+psmux new-session -d -s "mru7" -x 120 -y 40 2>$null
+Start-Sleep -Seconds 2
+
+# Get initial pane ID
+$id1_7 = Get-ActivePaneId "mru7"
+Write-Host "  Initial pane: $id1_7" -ForegroundColor Gray
+
+# split-window -h  →  %1 (left), %2 (right, active)
+psmux split-window -h -t "mru7" 2>$null
+Start-Sleep -Milliseconds 800
+
+$id2_7 = Get-ActivePaneId "mru7"
+Write-Host "  After h-split, active (right): $id2_7" -ForegroundColor Gray
+
+# split-window -v -t %1 (target by pane ID) → splits %1, new pane active
+psmux split-window -v -t $id1_7 2>$null
+Start-Sleep -Milliseconds 800
+
+$id3_7 = Get-ActivePaneId "mru7"
+Write-Host "  After v-split targeting $id1_7, active (new): $id3_7" -ForegroundColor Gray
+
+# Kill active  →  expected: %2 (not %1, because -t should not touch MRU)
+psmux kill-pane -t "mru7" 2>$null
+Start-Sleep -Milliseconds 800
+
+$result7 = Get-ActivePaneId "mru7"
+Write-Host "  After kill, active: $result7" -ForegroundColor Gray
+Report "split-window -t %%ID no MRU pollution" ($result7 -eq $id2_7) "expected=$id2_7 got=$result7"
+
+psmux kill-session -t "mru7" 2>$null
+Start-Sleep -Milliseconds 500
+
+###############################################################################
+# TEST 8: detached split-window -d -t does NOT pollute MRU
+###############################################################################
+Write-Host "`n--- TEST 8: detached split-window -d -t no MRU pollution ---" -ForegroundColor Yellow
+Kill-All
+
+psmux new-session -d -s "mru8" -x 120 -y 40 2>$null
+Start-Sleep -Seconds 2
+
+$id1_8 = Get-ActivePaneId "mru8"
+
+# non-detached split  →  %2 active
+psmux split-window -h -t "mru8" 2>$null
+Start-Sleep -Milliseconds 800
+
+$id2_8 = Get-ActivePaneId "mru8"
+Write-Host "  After h-split, active: $id2_8" -ForegroundColor Gray
+
+# detached split targeting %1 by ID  →  focus stays on %2
+psmux split-window -d -v -t $id1_8 2>$null
+Start-Sleep -Milliseconds 800
+
+$after_detach = Get-ActivePaneId "mru8"
+Write-Host "  After detached split, active: $after_detach" -ForegroundColor Gray
+Report "detached split focus unchanged" ($after_detach -eq $id2_8) "expected=$id2_8 got=$after_detach"
+
+# Kill active %2  →  MRU should pick %1 (not %3 the detached pane)
+psmux kill-pane -t "mru8" 2>$null
+Start-Sleep -Milliseconds 800
+
+$result8 = Get-ActivePaneId "mru8"
+Write-Host "  After kill, active: $result8" -ForegroundColor Gray
+Report "detached -t no MRU pollution on kill" ($result8 -eq $id1_8) "expected=$id1_8 got=$result8"
+
+psmux kill-session -t "mru8" 2>$null
+Start-Sleep -Milliseconds 500
+
+###############################################################################
+# TEST 9: longer targeted split sequence then kill-down (tmux parity)
+###############################################################################
+Write-Host "`n--- TEST 9: longer targeted split + kill-down order ---" -ForegroundColor Yellow
+Kill-All
+
+psmux new-session -d -s "mru9" -x 120 -y 40 2>$null
+Start-Sleep -Seconds 2
+
+# Build 4-pane layout with targeted splits
+psmux split-window -h -t "mru9:0.0" 2>$null
+Start-Sleep -Milliseconds 800
+$id2_9 = Get-ActivePaneId "mru9"
+
+psmux split-window -v -t "mru9:0.0" 2>$null
+Start-Sleep -Milliseconds 800
+$id3_9 = Get-ActivePaneId "mru9"
+
+psmux split-window -v -t "mru9:0.2" 2>$null
+Start-Sleep -Milliseconds 800
+$id4_9 = Get-ActivePaneId "mru9"
+
+Write-Host "  4 panes, newest active: $id4_9" -ForegroundColor Gray
+
+# Kill down: should follow newest-to-oldest (tmux parity)
+psmux kill-pane -t "mru9" 2>$null
+Start-Sleep -Milliseconds 800
+$r1 = Get-ActivePaneId "mru9"
+Report "kill 1st: focus prev split (%3)" ($r1 -eq $id3_9) "expected=$id3_9 got=$r1"
+
+psmux kill-pane -t "mru9" 2>$null
+Start-Sleep -Milliseconds 800
+$r2 = Get-ActivePaneId "mru9"
+Report "kill 2nd: focus prev split (%2)" ($r2 -eq $id2_9) "expected=$id2_9 got=$r2"
+
+psmux kill-session -t "mru9" 2>$null
+Kill-All
+
+###############################################################################
 # SUMMARY
 ###############################################################################
 Write-Host "`n================================================================" -ForegroundColor Cyan

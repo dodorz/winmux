@@ -262,8 +262,7 @@ if control_echo || control_noecho {
         };
 
         // Apply target focus
-        let is_focus_cmd = matches!(cmd_name, "select-window" | "selectw" | "select-pane" | "selectp")
-            || (matches!(cmd_name, "split-window" | "splitw") && !filtered_args.iter().any(|a| *a == "-d"));
+        let is_focus_cmd = matches!(cmd_name, "select-window" | "selectw" | "select-pane" | "selectp");
         if let Some(wid) = ctrl_target_win {
             if is_focus_cmd {
                 let _ = tx_ctrl.send(CtrlReq::FocusWindow(wid));
@@ -436,8 +435,7 @@ let args: Vec<&str> = {
     filtered
 };
 // Commands that should permanently change focus when used with -t
-let is_focus_cmd = matches!(cmd, "select-window" | "selectw" | "select-pane" | "selectp")
-    || (matches!(cmd, "split-window" | "splitw") && !args.iter().any(|a| *a == "-d"));
+let is_focus_cmd = matches!(cmd, "select-window" | "selectw" | "select-pane" | "selectp");
 if let Some(wid) = target_win {
     if is_focus_cmd {
         let _ = tx.send(CtrlReq::FocusWindow(wid));
