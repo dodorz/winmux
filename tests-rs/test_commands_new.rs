@@ -1995,3 +1995,21 @@ fn resolve_run_shell_returns_valid_shell() {
         prog
     );
 }
+
+#[cfg(windows)]
+#[test]
+fn resolve_run_shell_returns_absolute_windows_shell_path() {
+    let (prog, args) = resolve_run_shell();
+    let path = std::path::Path::new(&prog);
+    assert!(!args.is_empty(), "shell args should include at least one flag");
+    assert!(
+        path.is_absolute(),
+        "windows run-shell should resolve to an absolute executable path, got '{}'",
+        prog
+    );
+    assert!(
+        path.is_file(),
+        "resolved windows shell path should point to an existing file, got '{}'",
+        prog
+    );
+}

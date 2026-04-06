@@ -1,5 +1,7 @@
 use std::io;
 use std::time::Instant;
+#[cfg(windows)]
+use std::path::PathBuf;
 
 use std::io::Write;
 use crate::types::{AppState, Mode, Action, FocusDir, LayoutKind, MenuItem, Menu, Node};
@@ -35,11 +37,31 @@ pub(crate) const DISPLAY_MESSAGE_DEFAULT_FMT: &str =
 pub fn resolve_run_shell() -> (String, Vec<String>) {
     #[cfg(windows)]
     {
-        if which::which("pwsh").is_ok() {
-            return ("pwsh".to_string(), vec!["-NoProfile".to_string(), "-Command".to_string()]);
+        if let Ok(path) = which::which("pwsh") {
+            return (path.to_string_lossy().into_owned(), vec!["-NoProfile".to_string(), "-Command".to_string()]);
         }
-        if which::which("powershell").is_ok() {
-            return ("powershell".to_string(), vec!["-NoProfile".to_string(), "-Command".to_string()]);
+        if let Ok(path) = which::which("powershell") {
+            return (path.to_string_lossy().into_owned(), vec!["-NoProfile".to_string(), "-Command".to_string()]);
+        }
+        if let Ok(system_root) = std::env::var("SystemRoot").or_else(|_| std::env::var("SYSTEMROOT")) {
+            let powershell = PathBuf::from(&system_root)
+                .join("System32")
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe");
+            if powershell.is_file() {
+                return (powershell.to_string_lossy().into_owned(), vec!["-NoProfile".to_string(), "-Command".to_string()]);
+            }
+            let cmd = PathBuf::from(&system_root).join("System32").join("cmd.exe");
+            if cmd.is_file() {
+                return (cmd.to_string_lossy().into_owned(), vec!["/c".to_string()]);
+            }
+        }
+        if let Ok(comspec) = std::env::var("ComSpec").or_else(|_| std::env::var("COMSPEC")) {
+            let trimmed = comspec.trim();
+            if !trimmed.is_empty() {
+                return (trimmed.to_string(), vec!["/c".to_string()]);
+            }
         }
         ("cmd".to_string(), vec!["/c".to_string()])
     }
@@ -1315,12 +1337,16 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
                     } else if condition == "false" || condition == "0" {
                         false
                     } else {
-                        std::process::Command::new(if cfg!(windows) { "pwsh" } else { "sh" })
-                            .args(if cfg!(windows) { vec!["-NoProfile", "-Command", condition] } else { vec!["-c", condition] })
+                        {
+                            let (shell_prog, mut shell_args) = resolve_run_shell();
+                            shell_args.push(condition.to_string());
+                            std::process::Command::new(&shell_prog)
+                            .args(shell_args)
                             .stdout(std::process::Stdio::null())
                             .stderr(std::process::Stdio::null())
                             .status()
                             .map(|s| s.success()).unwrap_or(false)
+                        }
                     };
                     if let Some(chosen) = if success { Some(true_cmd) } else { false_cmd } {
                         execute_command_string(app, chosen)?;
