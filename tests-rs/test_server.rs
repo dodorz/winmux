@@ -1,5 +1,5 @@
 use super::should_spawn_warm_server;
-use super::helpers::combined_data_version;
+use super::helpers::{combined_data_version, list_windows_json_with_tabs};
 use crate::types::AppState;
 
 // ── Hook set/replace/unset tests (issue #133) ───────────────────
@@ -380,4 +380,84 @@ fn bell_action_set_to_other_via_config() {
     let mut app = AppState::new("test".to_string());
     crate::config::parse_config_line(&mut app, "set -g bell-action other");
     assert_eq!(app.bell_action, "other");
+}
+
+// ── Issue #125: window_zoomed_flag status bar caching ───────────
+
+fn mock_window_for_server(name: &str) -> crate::types::Window {
+    crate::types::Window {
+        root: crate::types::Node::Split {
+            kind: crate::types::LayoutKind::Horizontal,
+            sizes: vec![],
+            children: vec![],
+        },
+        active_path: vec![],
+        name: name.to_string(),
+        id: 0,
+        activity_flag: false,
+        bell_flag: false,
+        silence_flag: false,
+        last_output_time: std::time::Instant::now(),
+        last_seen_version: 0,
+        manual_rename: false,
+        layout_index: 0,
+        pane_mru: vec![],
+        zoom_saved: None,
+        linked_from: None,
+    }
+}
+
+#[test]
+fn list_windows_tab_text_reflects_zoom_flag() {
+    // Simulates the core issue #125 bug: after zoom toggle, the
+    // server must re-expand window-status-format so that
+    // #{?window_zoomed_flag,+, } updates in the status bar.
+    // If list_windows_json_with_tabs is not called (because meta_dirty
+    // is not set), the client receives stale tab_text.
+    let mut app = AppState::new("test".to_string());
+    app.window_status_current_format = "#W #{?window_zoomed_flag,+, }".to_string();
+    app.window_status_format = "#W #{?window_zoomed_flag,+, }".to_string();
+    let mut win0 = mock_window_for_server("editor");
+    win0.id = 0;
+    app.windows.push(win0);
+    app.active_idx = 0;
+
+    // Before zoom: tab_text should NOT contain +
+    let json_before = list_windows_json_with_tabs(&app).unwrap();
+    assert!(json_before.contains("editor  ") || !json_before.contains("editor +"),
+        "before zoom, tab_text should not show +, got: {}", json_before);
+
+    // Simulate zoom toggle
+    app.windows[0].zoom_saved = Some(vec![(vec![], vec![50, 50])]);
+
+    // After zoom: tab_text MUST contain + (this only happens if
+    // list_windows_json_with_tabs is actually re-called, which
+    // requires meta_dirty = true in the server loop)
+    let json_after = list_windows_json_with_tabs(&app).unwrap();
+    assert!(json_after.contains("editor +"),
+        "after zoom, tab_text must show +, got: {}", json_after);
+}
+
+#[test]
+fn list_windows_tab_text_per_window_zoom() {
+    // Multi-window scenario from issue #125 follow-up:
+    // zoom window 0, switch to window 1 — window 0 must keep +
+    let mut app = AppState::new("test".to_string());
+    app.window_status_current_format = "#I #W #{?window_zoomed_flag,+, }".to_string();
+    app.window_status_format = "#I #W #{?window_zoomed_flag,+, }".to_string();
+    let mut win0 = mock_window_for_server("editor");
+    win0.id = 0;
+    win0.zoom_saved = Some(vec![(vec![], vec![50, 50])]);
+    let mut win1 = mock_window_for_server("shell");
+    win1.id = 1;
+    app.windows.push(win0);
+    app.windows.push(win1);
+    // Active window is 1 (user switched away from zoomed window 0)
+    app.active_idx = 1;
+
+    let json = list_windows_json_with_tabs(&app).unwrap();
+    // Window 0 (zoomed) should show +
+    assert!(json.contains("editor +"), "zoomed window 0 must show +, got: {}", json);
+    // Window 1 (not zoomed) should show space, not +
+    assert!(!json.contains("shell +"), "non-zoomed window 1 must not show +, got: {}", json);
 }
