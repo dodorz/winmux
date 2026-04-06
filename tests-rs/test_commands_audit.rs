@@ -577,6 +577,55 @@ fn if_shell_literal_false_runs_false_cmd() {
     assert_eq!(app.active_idx, 1, "condition 'false' should run the false command");
 }
 
+// Regression: #183 — if-shell -F must expand format variables before truthiness check
+#[test]
+fn if_shell_format_expands_user_option_truthy() {
+    let mut app = mock_app_with_windows(&["a", "b", "c"]);
+    app.active_idx = 0;
+    // Set @pane-is-vim to "1" (truthy)
+    app.user_options.insert("@pane-is-vim".to_string(), "1".to_string());
+    // The format string #{@pane-is-vim} must be expanded to "1" before evaluation
+    execute_command_string(&mut app, r##"if-shell -F "#{@pane-is-vim}" next-window previous-window"##).unwrap();
+    assert_eq!(app.active_idx, 1, "@pane-is-vim=1 should expand to truthy, running next-window");
+}
+
+#[test]
+fn if_shell_format_expands_user_option_falsy() {
+    let mut app = mock_app_with_windows(&["a", "b", "c"]);
+    app.active_idx = 1;
+    // Set @pane-is-vim to "0" (falsy)
+    app.user_options.insert("@pane-is-vim".to_string(), "0".to_string());
+    execute_command_string(&mut app, r##"if-shell -F "#{@pane-is-vim}" next-window previous-window"##).unwrap();
+    assert_eq!(app.active_idx, 0, "@pane-is-vim=0 should expand to falsy, running previous-window");
+}
+
+#[test]
+fn if_shell_format_expands_unset_option_as_falsy() {
+    let mut app = mock_app_with_windows(&["a", "b", "c"]);
+    app.active_idx = 1;
+    // @pane-is-vim is NOT set, so #{@pane-is-vim} should expand to "" (empty = falsy)
+    execute_command_string(&mut app, r##"if-shell -F "#{@pane-is-vim}" next-window previous-window"##).unwrap();
+    assert_eq!(app.active_idx, 0, "unset @pane-is-vim should expand to empty (falsy), running previous-window");
+}
+
+#[test]
+fn if_shell_format_expands_session_name() {
+    let mut app = mock_app_with_windows(&["a", "b", "c"]);
+    app.active_idx = 0;
+    // #{session_name} is always non-empty ("test_session"), so true branch should run
+    execute_command_string(&mut app, r##"if-shell -F "#{session_name}" next-window previous-window"##).unwrap();
+    assert_eq!(app.active_idx, 1, "session_name should expand to non-empty truthy value");
+}
+
+#[test]
+fn if_shell_format_expands_window_zoomed_flag() {
+    let mut app = mock_app_with_windows(&["a", "b", "c"]);
+    app.active_idx = 1;
+    // window_zoomed_flag is 0 when not zoomed, should be falsy
+    execute_command_string(&mut app, r##"if-shell -F "#{window_zoomed_flag}" next-window previous-window"##).unwrap();
+    assert_eq!(app.active_idx, 0, "window_zoomed_flag=0 (not zoomed) should be falsy");
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 //  previous-layout: cycles layout in reverse
 // ════════════════════════════════════════════════════════════════════════════

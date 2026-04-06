@@ -1322,9 +1322,13 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
             } else {
-                // Local if-shell execution
-                let format_mode = parts.iter().any(|p| *p == "-F" || *p == "-bF" || *p == "-Fb");
-                let positional: Vec<&str> = parts[1..].iter().filter(|p| !p.starts_with('-')).copied().collect();
+                // Re-parse with quote-aware tokenizer so quoted args are handled
+                let parsed = parse_command_line(cmd);
+                let format_mode = parsed.iter().any(|p| p == "-F" || p == "-bF" || p == "-Fb");
+                let positional: Vec<&str> = parsed[1..].iter()
+                    .filter(|p| !p.starts_with('-'))
+                    .map(|s| s.as_str())
+                    .collect();
                 if positional.len() >= 2 {
                     let condition = positional[0];
                     let true_cmd = positional[1];
