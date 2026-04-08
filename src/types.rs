@@ -1091,42 +1091,60 @@ pub fn shutdown_client_stream(client_id: u64) {
             }
         });
     }
-    if let Ok(mut v) = FRAME_PUSH_SENDERS.lock() {
+    if let Ok(mut v) = FRAME_PUSH_SLOTS.lock() {
         v.retain(|(cid, _)| *cid != client_id);
     }
 }
 
-/// Server-push frame senders for persistent (attached) clients.
-/// Instead of clients polling dump-state, the server proactively pushes
-/// serialized frames through these channels whenever state changes.
-/// Each sender feeds a `Receiver<String>` into the persistent connection's
-/// existing writer-thread pipeline (which expects oneshot receivers).
-static FRAME_PUSH_SENDERS: std::sync::Mutex<Vec<(u64, std::sync::mpsc::Sender<std::sync::mpsc::Receiver<String>>)>> =
+/// Server-push frame slots for persistent (attached) clients.
+/// Each slot holds at most ONE pending frame — `push_frame()` overwrites
+/// any unconsumed frame, so memory is bounded to O(clients), not O(frames).
+///
+/// Previous design used unbounded `mpsc::channel` per client, creating a new
+/// `String` allocation per frame per client.  During rapid scroll events in
+/// copy mode (~20+ frames/sec, each ~500KB with cell content), frames
+/// accumulated faster than the writer thread could flush to TCP, causing
+/// unbounded memory growth (measured: 8 MB → 1 GB in <2000 scroll events).
+pub type FrameSlot = std::sync::Arc<(std::sync::Mutex<Option<String>>, std::sync::Condvar)>;
+
+static FRAME_PUSH_SLOTS: std::sync::Mutex<Vec<(u64, FrameSlot)>> =
     std::sync::Mutex::new(Vec::new());
 
-/// Register a persistent connection's resp_tx clone for server-pushed frames,
+/// Register a frame slot for a persistent connection's writer thread,
 /// tagged with client_id for targeted operations (e.g. force-detach).
-pub fn register_frame_sender(client_id: u64, tx: std::sync::mpsc::Sender<std::sync::mpsc::Receiver<String>>) {
-    if let Ok(mut v) = FRAME_PUSH_SENDERS.lock() {
-        v.push((client_id, tx));
+/// Returns the slot Arc for the writer thread to consume from.
+pub fn register_frame_slot(client_id: u64) -> FrameSlot {
+    let slot: FrameSlot =
+        std::sync::Arc::new((std::sync::Mutex::new(None), std::sync::Condvar::new()));
+    if let Ok(mut v) = FRAME_PUSH_SLOTS.lock() {
+        v.push((client_id, slot.clone()));
     }
+    slot
 }
 
-/// Push a serialized frame to all persistent clients.  Dead senders are pruned.
+/// Push a serialized frame to all persistent clients.
+/// Overwrites any unconsumed frame — only the latest frame matters.
+/// Dead slots (writer thread exited) are pruned automatically.
 pub fn push_frame(frame: &str) {
-    if let Ok(mut senders) = FRAME_PUSH_SENDERS.lock() {
-        senders.retain(|(_, tx)| {
-            let (rtx, rrx) = std::sync::mpsc::channel();
-            // Send the frame through a oneshot so it fits the existing writer thread protocol
-            if rtx.send(frame.to_string()).is_err() { return false; }
-            tx.send(rrx).is_ok()
+    if let Ok(mut slots) = FRAME_PUSH_SLOTS.lock() {
+        slots.retain(|(_, slot)| {
+            // If only FRAME_PUSH_SLOTS holds the Arc, the writer thread is gone
+            if std::sync::Arc::strong_count(slot) <= 1 {
+                return false;
+            }
+            let (lock, cvar) = &**slot;
+            if let Ok(mut pending) = lock.lock() {
+                *pending = Some(frame.to_string());
+                cvar.notify_one();
+            }
+            true
         });
     }
 }
 
 /// Check if any persistent clients are registered for push.
 pub fn has_frame_receivers() -> bool {
-    FRAME_PUSH_SENDERS.lock().map_or(false, |v| !v.is_empty())
+    FRAME_PUSH_SLOTS.lock().map_or(false, |v| !v.is_empty())
 }
 
 /// Global counter for control mode client IDs.
