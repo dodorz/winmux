@@ -48,3 +48,19 @@ fn show_options_scroll_enter_copy_mode_off() {
     let output = crate::server::options::get_option_value(&app, "scroll-enter-copy-mode");
     assert_eq!(output, "off");
 }
+
+#[test]
+fn apply_set_option_scroll_enter_copy_mode_off() {
+    let mut app = mock_app();
+    assert!(app.scroll_enter_copy_mode);
+    crate::server::options::apply_set_option(&mut app, "scroll-enter-copy-mode", "off", false);
+    assert!(!app.scroll_enter_copy_mode, "apply_set_option should set scroll_enter_copy_mode to false");
+}
+
+#[test]
+fn apply_set_option_scroll_enter_copy_mode_on() {
+    let mut app = mock_app();
+    app.scroll_enter_copy_mode = false;
+    crate::server::options::apply_set_option(&mut app, "scroll-enter-copy-mode", "on", false);
+    assert!(app.scroll_enter_copy_mode, "apply_set_option should set scroll_enter_copy_mode to true");
+}

@@ -168,6 +168,7 @@ pub(crate) fn apply_set_option(app: &mut AppState, option: &str, value: &str, _q
             }
         }
         "mouse" => { app.mouse_enabled = value == "on" || value == "true" || value == "1"; }
+        "scroll-enter-copy-mode" => { app.scroll_enter_copy_mode = matches!(value, "on" | "true" | "1"); }
         "prefix" => {
             if let Some(kc) = parse_key_string(value) {
                 app.prefix_key = kc;
