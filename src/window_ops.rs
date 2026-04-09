@@ -8,7 +8,7 @@ use crate::types::{AppState, Mode, Pane, Node, LayoutKind, DragState, Window, Fo
 use crate::tree::{active_pane, active_pane_mut, compute_rects, compute_split_borders,
     split_sizes_at, adjust_split_sizes, get_split_mut, resize_all_panes};
 use crate::pane::{detect_shell, build_default_shell, set_tmux_env};
-use crate::copy_mode::{enter_copy_mode, exit_copy_mode, scroll_copy_up, scroll_copy_down, yank_selection};
+use crate::copy_mode::{enter_copy_mode, exit_copy_mode, scroll_copy_up, scroll_copy_down, scroll_pane_scrollback, yank_selection};
 use crate::platform::mouse_inject;
 
 /// Mouse debug logger — writes to ~/.psmux/mouse_debug.log when
@@ -799,20 +799,18 @@ fn remote_scroll_wheel(app: &mut AppState, x: u16, y: u16, up: bool) {
             inject_mouse_combined(p, col, row, sgr_btn, true,
                 button_state, mouse_inject::MOUSE_WHEELED, &win_name);
         }
-    } else if up {
+    } else if up && app.scroll_enter_copy_mode {
         // Shell prompt — auto-enter copy mode and scroll up (tmux parity)
-        // Respect scroll-enter-copy-mode option (#193)
-        if app.scroll_enter_copy_mode {
-            mouse_log("  -> entering copy mode (shell scroll-up)");
-            enter_copy_mode(app);
-            scroll_copy_up(app, 3);
-        } else {
-            mouse_log("  -> scroll-enter-copy-mode off, ignoring scroll-up at shell");
-        }
+        mouse_log("  -> entering copy mode (shell scroll-up)");
+        enter_copy_mode(app);
+        scroll_copy_up(app, 3);
+    } else if !app.scroll_enter_copy_mode {
+        // scroll-enter-copy-mode off: scroll scrollback directly (#193)
+        mouse_log("  -> direct scrollback (scroll-enter-copy-mode off)");
+        scroll_pane_scrollback(app, 3, up);
     } else {
         mouse_log("  -> scroll-down at shell (no-op)");
     }
-    // Scroll down at shell prompt without copy mode is a no-op
 }
 
 pub fn remote_scroll_up(app: &mut AppState, x: u16, y: u16) { remote_scroll_wheel(app, x, y, true); }
@@ -943,13 +941,13 @@ pub fn handle_pane_scroll(app: &mut AppState, pane_id: usize, up: bool) {
             inject_mouse_combined(pane, 0, 0, sgr_btn, true,
                 button_state, mouse_inject::MOUSE_WHEELED, &win_name);
         }
-    } else if up {
+    } else if up && app.scroll_enter_copy_mode {
         // Shell prompt — enter copy mode and scroll
-        // Respect scroll-enter-copy-mode option (#193)
-        if app.scroll_enter_copy_mode {
-            enter_copy_mode(app);
-            scroll_copy_up(app, 3);
-        }
+        enter_copy_mode(app);
+        scroll_copy_up(app, 3);
+    } else if !app.scroll_enter_copy_mode {
+        // scroll-enter-copy-mode off: scroll scrollback directly (#193)
+        scroll_pane_scrollback(app, 3, up);
     }
 }
 
