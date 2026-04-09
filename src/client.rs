@@ -1323,7 +1323,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 if entry.c == "detach-client" || entry.c == "detach" {
                                     quit = true;
                                 } else {
-                                    cmd_batch.push(format!("{}\n", entry.c));
+                                    // Split on \; to support command chaining (issue #192)
+                                    let sub_cmds = crate::config::split_chained_commands_pub(&entry.c);
+                                    for sub in &sub_cmds {
+                                        cmd_batch.push(format!("{}\n", sub));
+                                    }
                                 }
                             }
                         }
@@ -1341,7 +1345,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 } else if entry.c.starts_with("confirm-before") || entry.c == "kill-pane" {
                                     confirm_cmd = Some(entry.c.clone());
                                 } else {
-                                    cmd_batch.push(format!("{}\n", entry.c));
+                                    // Split on \; to support command chaining (issue #192)
+                                    let sub_cmds = crate::config::split_chained_commands_pub(&entry.c);
+                                    for sub in &sub_cmds {
+                                        cmd_batch.push(format!("{}\n", sub));
+                                    }
                                 }
                             } else {
                             // Default hardcoded bindings (only reached if no user override)
@@ -1755,7 +1763,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     if !trimmed.is_empty() {
                                         command_history.push(trimmed.clone());
                                         command_history_idx = command_history.len();
-                                        cmd_batch.push(format!("{}\n", trimmed));
+                                        // Split on \; or ; to support command chaining (issue #192)
+                                        let sub_cmds = crate::config::split_chained_commands_pub(&trimmed);
+                                        for sub in &sub_cmds {
+                                            cmd_batch.push(format!("{}\n", sub));
+                                        }
                                     }
                                     command_input = false;
                                     command_cursor = 0;

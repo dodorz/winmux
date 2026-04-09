@@ -670,6 +670,16 @@ pub fn execute_action(app: &mut AppState, action: &Action) -> io::Result<bool> {
 pub fn execute_command_prompt(app: &mut AppState) -> io::Result<()> {
     let cmdline = match &app.mode { Mode::CommandPrompt { input, .. } => input.clone(), _ => String::new() };
     app.mode = Mode::Passthrough;
+
+    // Split on \; or ; to support command chaining (issue #192)
+    let sub_commands = crate::config::split_chained_commands_pub(&cmdline);
+    if sub_commands.len() > 1 {
+        for sub in &sub_commands {
+            execute_command_string(app, sub)?;
+        }
+        return Ok(());
+    }
+
     let parts: Vec<&str> = cmdline.split_whitespace().collect();
     if parts.is_empty() { return Ok(()); }
     match parts[0] {
@@ -702,6 +712,18 @@ pub fn execute_command_prompt(app: &mut AppState) -> io::Result<()> {
 
 /// Execute a command string (used by menus, hooks, confirm dialogs, etc.)
 pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
+    // Split on \; or ; to support command chaining (issue #192)
+    let sub_commands = crate::config::split_chained_commands_pub(cmd);
+    if sub_commands.len() > 1 {
+        for sub in &sub_commands {
+            execute_command_string_single(app, sub)?;
+        }
+        return Ok(());
+    }
+    execute_command_string_single(app, cmd)
+}
+
+fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()> {
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     if parts.is_empty() { return Ok(()); }
     
@@ -1662,3 +1684,7 @@ mod tests_parity;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue179_bind_key_uppercase.rs"]
 mod tests_issue179_bind_key_uppercase;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue192_command_chaining.rs"]
+mod tests_issue192_command_chaining;
