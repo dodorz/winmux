@@ -127,7 +127,9 @@ pub fn send_control(line: String) -> io::Result<()> {
     let mut target = env::var("PSMUX_TARGET_SESSION").ok().unwrap_or_else(|| "default".to_string());
     // Never target a warm (standby) session — resolve to a real session instead
     if is_warm_session(&target) {
-        target = resolve_last_session_name().unwrap_or_else(|| "default".to_string());
+        // Extract namespace from warm session name (e.g. "foo____warm__" -> Some("foo"))
+        let ns = target.strip_suffix("____warm__").map(|s| s.to_string());
+        target = resolve_last_session_name_ns(ns.as_deref()).unwrap_or_else(|| "default".to_string());
     }
     let full_target = env::var("PSMUX_TARGET_FULL").ok();
     let path = format!("{}\\.psmux\\{}.port", home, target);
@@ -156,7 +158,8 @@ pub fn send_control_with_response(line: String) -> io::Result<String> {
     let mut target = env::var("PSMUX_TARGET_SESSION").ok().unwrap_or_else(|| "default".to_string());
     // Never target a warm (standby) session — resolve to a real session instead
     if is_warm_session(&target) {
-        target = resolve_last_session_name().unwrap_or_else(|| "default".to_string());
+        let ns = target.strip_suffix("____warm__").map(|s| s.to_string());
+        target = resolve_last_session_name_ns(ns.as_deref()).unwrap_or_else(|| "default".to_string());
     }
     let full_target = env::var("PSMUX_TARGET_FULL").ok();
     let path = format!("{}\\.psmux\\{}.port", home, target);
@@ -211,13 +214,28 @@ pub fn send_control_to_port(port: u16, msg: &str, session_key: &str) -> io::Resu
 }
 
 pub fn resolve_last_session_name() -> Option<String> {
+    resolve_last_session_name_ns(None)
+}
+
+/// Resolve the most recently modified session, optionally filtered by -L namespace.
+/// When `ns` is Some("foo"), only sessions with port files named "foo__*" are considered
+/// and the returned name includes the prefix (e.g. "foo__dev").
+/// When `ns` is None, only non-namespaced sessions (no "__" in name) are considered.
+pub fn resolve_last_session_name_ns(ns: Option<&str>) -> Option<String> {
     let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).ok()?;
     let dir = format!("{}\\.psmux", home);
     let last = std::fs::read_to_string(format!("{}\\last_session", dir)).ok();
     if let Some(name) = last {
         let name = name.trim().to_string();
-        let p = format!("{}\\{}.port", dir, name);
-        if std::path::Path::new(&p).exists() { return Some(name); }
+        // Only accept the cached last_session if it matches the namespace filter
+        let ns_ok = match ns {
+            Some(n) => name.starts_with(&format!("{}__", n)),
+            None => !name.contains("__"),
+        };
+        if ns_ok {
+            let p = format!("{}\\{}.port", dir, name);
+            if std::path::Path::new(&p).exists() { return Some(name); }
+        }
     }
     let mut picks: Vec<(String, std::time::SystemTime)> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(&dir) {
@@ -229,8 +247,13 @@ pub fn resolve_last_session_name() -> Option<String> {
             }
         }
     }
-    // Exclude warm (standby) sessions — users should never auto-attach to them
+    // Exclude warm (standby) sessions
     picks.retain(|(n, _)| !is_warm_session(n));
+    // Filter by namespace: -L sessions have "ns__name" format
+    picks.retain(|(n, _)| match ns {
+        Some(prefix) => n.starts_with(&format!("{}__", prefix)),
+        None => !n.contains("__"),
+    });
     picks.sort_by_key(|(_, t)| *t);
     picks.last().map(|(n, _)| n.clone())
 }
@@ -258,6 +281,11 @@ pub fn reap_children_placeholder() -> io::Result<bool> { Ok(false) }
 
 /// Return the names of all live sessions by scanning .psmux/*.port files.
 pub fn list_session_names() -> Vec<String> {
+    list_session_names_ns(None)
+}
+
+/// Return session names filtered by namespace (same logic as resolve_last_session_name_ns).
+pub fn list_session_names_ns(ns: Option<&str>) -> Vec<String> {
     let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
     let dir = format!("{}\\.psmux", home);
     let mut names = Vec::new();
@@ -267,6 +295,15 @@ pub fn list_session_names() -> Vec<String> {
                 if let Some((base, ext)) = fname.rsplit_once('.') {
                     if ext == "port" {
                         if is_warm_session(base) { continue; }
+                        // Filter by namespace
+                        match ns {
+                            Some(prefix) => {
+                                if !base.starts_with(&format!("{}__", prefix)) { continue; }
+                            }
+                            None => {
+                                if base.contains("__") { continue; }
+                            }
+                        }
                         names.push(base.to_string());
                     }
                 }
