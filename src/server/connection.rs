@@ -1115,14 +1115,19 @@ match cmd {
         }
     }
     "unbind-key" | "unbind" => {
-        if args.iter().any(|a| *a == "-a" || a.contains('a') && a.starts_with('-')) {
-            // Parse -T table_name, default to "prefix" like tmux
-            let mut table = "prefix".to_string();
+        if args.iter().any(|a| *a == "-a" || (a.starts_with('-') && a.contains('a'))) {
+            // Check if -T or -n was explicitly specified
+            let mut has_table = false;
+            let mut table = String::new();
             for (j, a) in args.iter().enumerate() {
-                if *a == "-T" { if let Some(t) = args.get(j + 1) { table = t.to_string(); } }
-                if *a == "-n" { table = "root".to_string(); }
+                if *a == "-T" { if let Some(t) = args.get(j + 1) { table = t.to_string(); has_table = true; } }
+                if *a == "-n" { table = "root".to_string(); has_table = true; }
             }
-            let _ = tx.send(CtrlReq::UnbindAllInTable(table));
+            if has_table {
+                let _ = tx.send(CtrlReq::UnbindAllInTable(table));
+            } else {
+                let _ = tx.send(CtrlReq::UnbindAll);
+            }
         } else {
             let non_flag_args: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
             if let Some(key) = non_flag_args.first() {
@@ -2222,14 +2227,18 @@ fn dispatch_control_command(
             true
         }
         "unbind-key" | "unbind" => {
-            if args.iter().any(|a| *a == "-a" || a.contains('a') && a.starts_with('-')) {
-                // Parse -T table_name, default to "prefix" like tmux
-                let mut table = "prefix".to_string();
+            if args.iter().any(|a| *a == "-a" || (a.starts_with('-') && a.contains('a'))) {
+                let mut has_table = false;
+                let mut table = String::new();
                 for (j, a) in args.iter().enumerate() {
-                    if *a == "-T" { if let Some(t) = args.get(j + 1) { table = t.to_string(); } }
-                    if *a == "-n" { table = "root".to_string(); }
+                    if *a == "-T" { if let Some(t) = args.get(j + 1) { table = t.to_string(); has_table = true; } }
+                    if *a == "-n" { table = "root".to_string(); has_table = true; }
                 }
-                let _ = tx.send(CtrlReq::UnbindAllInTable(table));
+                if has_table {
+                    let _ = tx.send(CtrlReq::UnbindAllInTable(table));
+                } else {
+                    let _ = tx.send(CtrlReq::UnbindAll);
+                }
             } else if let Some(key) = args.iter().find(|a| !a.starts_with('-')) {
                 let _ = tx.send(CtrlReq::UnbindKey(key.to_string()));
             }

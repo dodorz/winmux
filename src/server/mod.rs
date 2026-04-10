@@ -268,7 +268,25 @@ fn drain_plugin_req(
         }
         CtrlReq::SourceFile(path) => {
             app.defaults_suppressed = false;
+            app.key_tables.clear();
             crate::config::source_file(app, &path);
+        }
+        CtrlReq::UnbindAll => {
+            app.key_tables.clear();
+            app.defaults_suppressed = true;
+        }
+        CtrlReq::UnbindAllInTable(table) => {
+            if let Some(binds) = app.key_tables.get_mut(&table) {
+                binds.clear();
+            }
+        }
+        CtrlReq::UnbindKey(key) => {
+            if let Some(kc) = parse_key_string(&key) {
+                let kc = normalize_key_for_binding(kc);
+                for t in app.key_tables.values_mut() {
+                    t.retain(|b| b.key != kc);
+                }
+            }
         }
         // Ignore other request types during plugin drain
         _ => {}
@@ -1241,13 +1259,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     };
                     let cursor_style_code = crate::rendering::configured_cursor_code();
                     let _ = std::fmt::Write::write_fmt(&mut combined_buf, format_args!(
-                        "{{\"layout\":{},\"windows\":{},\"prefix\":\"{}\",\"prefix2\":\"{}\",\"tree\":{},\"base_index\":{},\"prediction_dimming\":{},\"status_style\":\"{}\",\"status_left\":\"{}\",\"status_right\":\"{}\",\"pane_border_style\":\"{}\",\"pane_active_border_style\":\"{}\",\"pane_border_hover_style\":\"{}\",\"wsf\":\"{}\",\"wscf\":\"{}\",\"wss\":\"{}\",\"ws_style\":\"{}\",\"wsc_style\":\"{}\",\"clock_mode\":{},\"bindings\":{},\"defaults_suppressed\":{},\"status_left_length\":{},\"status_right_length\":{},\"status_lines\":{},\"status_format\":{},\"mode_style\":\"{}\",\"status_position\":\"{}\",\"status_justify\":\"{}\",\"cursor_style_code\":{},\"status_visible\":{},\"repeat_time\":{},\"zoomed\":{}}}",
+                        "{{\"layout\":{},\"windows\":{},\"prefix\":\"{}\",\"prefix2\":\"{}\",\"tree\":{},\"base_index\":{},\"prediction_dimming\":{},\"status_style\":\"{}\",\"status_left\":\"{}\",\"status_right\":\"{}\",\"pane_border_style\":\"{}\",\"pane_active_border_style\":\"{}\",\"pane_border_hover_style\":\"{}\",\"wsf\":\"{}\",\"wscf\":\"{}\",\"wss\":\"{}\",\"ws_style\":\"{}\",\"wsc_style\":\"{}\",\"clock_mode\":{},\"bindings\":{},\"status_left_length\":{},\"status_right_length\":{},\"status_lines\":{},\"status_format\":{},\"mode_style\":\"{}\",\"status_position\":\"{}\",\"status_justify\":\"{}\",\"cursor_style_code\":{},\"status_visible\":{},\"repeat_time\":{},\"zoomed\":{},\"defaults_suppressed\":{}}}",
                         layout_json, cached_windows_json, cached_prefix_str, cached_prefix2_str, cached_tree_json, cached_base_index, cached_pred_dim, ss_escaped, sl_expanded, sr_expanded, pbs_escaped, pabs_escaped, pbhs_escaped, wsf_escaped, wscf_escaped, wss_escaped, ws_style_escaped, wsc_style_escaped,
-                        matches!(app.mode, Mode::ClockMode), cached_bindings_json, app.defaults_suppressed,
+                        matches!(app.mode, Mode::ClockMode), cached_bindings_json,
                         app.status_left_length, app.status_right_length, app.status_lines, status_format_json,
                         mode_style_escaped, status_position_escaped, status_justify_escaped,
                         cursor_style_code, app.status_visible, app.repeat_time_ms,
                         app.windows.get(app.active_idx).map_or(false, |w| w.zoom_saved.is_some()),
+                        app.defaults_suppressed,
                     ));
                     // Inject overlay state (popup, menu, confirm, display_panes)
                     {
@@ -2377,10 +2396,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     meta_dirty = true;
                     state_dirty = true;
                 }
-                CtrlReq::UnbindAllInTable(table_name) => {
-                    app.key_tables.remove(&table_name);
-                    if table_name == "prefix" {
-                        app.defaults_suppressed = true;
+                CtrlReq::UnbindAll => {
+                    app.key_tables.clear();
+                    app.defaults_suppressed = true;
+                    meta_dirty = true;
+                    state_dirty = true;
+                }
+                CtrlReq::UnbindAllInTable(table) => {
+                    if let Some(binds) = app.key_tables.get_mut(&table) {
+                        binds.clear();
                     }
                     meta_dirty = true;
                     state_dirty = true;
@@ -2591,10 +2615,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = resp.send(output);
                 }
                 CtrlReq::SourceFile(path) => {
-                    // Reset defaults_suppressed before re-parsing so the flag
-                    // reflects the CURRENT config. If the config still has
-                    // unbind-key -a, parsing will set it back to true.
+                    // Reset binding state so config reload gets a clean slate.
+                    // If the config has unbind-key -a, it will re-set the flag.
                     app.defaults_suppressed = false;
+                    app.key_tables.clear();
                     // Use config helper for standard source-file behavior (-F support,
                     // nested parse context). Keep direct glob handling for wildcard sources.
                     let is_format_expand = path.starts_with("-F ") || path.starts_with("-F\t");
@@ -3732,9 +3756,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             };
             let cursor_style_code = crate::rendering::configured_cursor_code();
             let _ = std::fmt::Write::write_fmt(&mut combined_buf, format_args!(
-                "{{\"layout\":{},\"windows\":{},\"prefix\":\"{}\",\"prefix2\":\"{}\",\"tree\":{},\"base_index\":{},\"prediction_dimming\":{},\"status_style\":\"{}\",\"status_left\":\"{}\",\"status_right\":\"{}\",\"pane_border_style\":\"{}\",\"pane_active_border_style\":\"{}\",\"pane_border_hover_style\":\"{}\",\"wsf\":\"{}\",\"wscf\":\"{}\",\"wss\":\"{}\",\"ws_style\":\"{}\",\"wsc_style\":\"{}\",\"clock_mode\":{},\"bindings\":{},\"defaults_suppressed\":{},\"status_left_length\":{},\"status_right_length\":{},\"status_lines\":{},\"status_format\":{},\"mode_style\":\"{}\",\"status_position\":\"{}\",\"status_justify\":\"{}\",\"cursor_style_code\":{},\"status_visible\":{},\"repeat_time\":{},\"zoomed\":{}}}",
+                "{{\"layout\":{},\"windows\":{},\"prefix\":\"{}\",\"prefix2\":\"{}\",\"tree\":{},\"base_index\":{},\"prediction_dimming\":{},\"status_style\":\"{}\",\"status_left\":\"{}\",\"status_right\":\"{}\",\"pane_border_style\":\"{}\",\"pane_active_border_style\":\"{}\",\"pane_border_hover_style\":\"{}\",\"wsf\":\"{}\",\"wscf\":\"{}\",\"wss\":\"{}\",\"ws_style\":\"{}\",\"wsc_style\":\"{}\",\"clock_mode\":{},\"bindings\":{},\"status_left_length\":{},\"status_right_length\":{},\"status_lines\":{},\"status_format\":{},\"mode_style\":\"{}\",\"status_position\":\"{}\",\"status_justify\":\"{}\",\"cursor_style_code\":{},\"status_visible\":{},\"repeat_time\":{},\"zoomed\":{}}}",
                 layout_json, cached_windows_json, cached_prefix_str, cached_prefix2_str, cached_tree_json, cached_base_index, cached_pred_dim, ss_escaped, sl_expanded, sr_expanded, pbs_escaped, pabs_escaped, pbhs_escaped, wsf_escaped, wscf_escaped, wss_escaped, ws_style_escaped, wsc_style_escaped,
-                matches!(app.mode, Mode::ClockMode), cached_bindings_json, app.defaults_suppressed,
+                matches!(app.mode, Mode::ClockMode), cached_bindings_json,
                 app.status_left_length, app.status_right_length, app.status_lines, status_format_json,
                 mode_style_escaped, status_position_escaped, status_justify_escaped,
                 cursor_style_code, app.status_visible, app.repeat_time_ms,

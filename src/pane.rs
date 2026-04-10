@@ -36,6 +36,7 @@ static CACHED_SHELL_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceL
 fn cached_shell() -> Option<&'static str> {
     CACHED_SHELL_PATH.get_or_init(|| {
         which::which("pwsh").ok()
+            .or_else(|| which::which("powershell").ok())
             .or_else(|| which::which("cmd").ok())
             .map(|p| p.to_string_lossy().into_owned())
     }).as_deref()
@@ -729,12 +730,160 @@ fn build_psrl_init(env_shim: bool, allow_predictions: bool) -> String {
     s
 }
 
+/// On Windows, translate Unix-style shell wrappers to Windows equivalents.
+///
+/// Tools like Overstory wrap agent commands in `/bin/bash -c '...'` for
+/// environment setup (unset/export). This doesn't work on Windows because
+/// `/bin/bash` doesn't exist. This function:
+/// 1. If the command is `/bin/bash -c '...'` or `/bin/sh -c '...'`, try to
+///    find `bash.exe` in PATH and rewrite to use the resolved path.
+/// 2. If bash isn't available, extract the inner script and translate
+///    common bash patterns (unset, export, &&) to PowerShell equivalents.
+/// 3. For other Unix absolute paths (/usr/bin/foo), try to resolve the
+///    basename from PATH.
+#[cfg(windows)]
+fn resolve_unix_path(cmd: &str) -> String {
+    let trimmed = cmd.trim();
+
+    // General case: resolve Unix absolute paths (e.g. /usr/bin/python3)
+    if trimmed.starts_with('/') {
+        let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
+        let program = parts[0];
+        let basename = std::path::Path::new(program)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(program);
+        if let Ok(resolved) = which::which(basename) {
+            let rest = if parts.len() > 1 { parts[1] } else { "" };
+            if rest.is_empty() {
+                return format!("\"{}\"", resolved.to_string_lossy());
+            } else {
+                return format!("\"{}\" {}", resolved.to_string_lossy(), rest);
+            }
+        }
+    }
+
+    // No translation needed
+    cmd.to_string()
+}
+
+/// Detect if a command is a `/bin/bash -c '...'` or similar pattern.
+/// Returns Some((inner_script, shell_name)) if matched.
+#[cfg(windows)]
+fn detect_bash_c_wrapper(cmd: &str) -> Option<(&str, &str)> {
+    let shell_prefixes = [
+        ("/bin/bash -c ", "bash"),
+        ("/bin/sh -c ", "sh"),
+        ("/usr/bin/bash -c ", "bash"),
+        ("/usr/bin/sh -c ", "sh"),
+        ("/usr/bin/env bash -c ", "bash"),
+        ("/usr/bin/env sh -c ", "sh"),
+    ];
+    for (prefix, shell_name) in &shell_prefixes {
+        if cmd.starts_with(prefix) {
+            let rest = &cmd[prefix.len()..];
+            // Strip outer quotes (single or double)
+            let inner = if (rest.starts_with('\'') && rest.ends_with('\''))
+                || (rest.starts_with('"') && rest.ends_with('"'))
+            {
+                &rest[1..rest.len() - 1]
+            } else {
+                rest
+            };
+            return Some((inner, shell_name));
+        }
+    }
+    None
+}
+
+/// Parse a bash-style env setup script and extract environment modifications
+/// plus the final command.  Returns (env_removes, env_sets, final_command).
+///
+/// This approach is **shell-agnostic**: instead of translating bash syntax to
+/// PowerShell/cmd syntax, we parse the env operations and apply them directly
+/// on the `CommandBuilder` (via `env_remove()` / `env()`).  The final command
+/// is then executed through whatever default shell the user has configured,
+/// without any env-manipulation syntax that could be shell-incompatible.
+#[cfg(windows)]
+fn parse_bash_env_script(script: &str) -> (Vec<String>, Vec<(String, String)>, String) {
+    let mut removes: Vec<String> = Vec::new();
+    let mut sets: Vec<(String, String)> = Vec::new();
+    let mut final_parts: Vec<String> = Vec::new();
+
+    let segments: Vec<&str> = script.split("&&").collect();
+    for seg in &segments {
+        let seg = seg.trim();
+        if seg.is_empty() { continue; }
+
+        if seg.starts_with("unset ") {
+            let vars: Vec<&str> = seg["unset ".len()..].split_whitespace().collect();
+            for var in vars {
+                removes.push(var.to_string());
+            }
+        } else if seg.starts_with("export ") {
+            let assign = &seg["export ".len()..];
+            if let Some(eq_pos) = assign.find('=') {
+                let var = assign[..eq_pos].to_string();
+                let mut val = assign[eq_pos + 1..].trim().to_string();
+                // Strip outer quotes
+                if (val.starts_with('"') && val.ends_with('"'))
+                    || (val.starts_with('\'') && val.ends_with('\''))
+                {
+                    val = val[1..val.len() - 1].to_string();
+                }
+                // Resolve $PATH / ${PATH} references to the actual current PATH value.
+                // Also fix Unix `:` separator to Windows `;`.
+                if let Ok(current_path) = std::env::var("PATH") {
+                    val = val.replace(":$PATH", &format!(";{}", current_path))
+                             .replace(":${PATH}", &format!(";{}", current_path))
+                             .replace("$PATH:", &format!("{};", current_path))
+                             .replace("${PATH}:", &format!("{};", current_path))
+                             .replace("$PATH", &current_path)
+                             .replace("${PATH}", &current_path);
+                }
+                sets.push((var, val));
+            }
+        } else {
+            // Final command or unknown segment — preserve as-is
+            final_parts.push(seg.to_string());
+        }
+    }
+
+    let final_cmd = final_parts.join(" && ");
+    (removes, sets, final_cmd)
+}
+
 pub fn build_command(command: Option<&str>, env_shim: bool, allow_predictions: bool) -> CommandBuilder {
     // Capture CWD early — portable_pty on Windows defaults to USERPROFILE
     // (home dir) when no cwd is set on CommandBuilder, so we must set it
     // explicitly to honour the caller's working directory.
     let cwd = std::env::current_dir().ok();
     if let Some(cmd) = command {
+        // On Windows, detect `/bin/bash -c '...'` wrappers used by tools like
+        // Overstory and omc for env var setup before launching agents.
+        // Instead of translating to shell-specific syntax (which breaks if the
+        // user's default shell is bash, cmd, or a different PowerShell version),
+        // we parse the env operations from the bash script and apply them directly
+        // on the CommandBuilder.  The final command is then passed to whatever
+        // shell `cached_shell()` resolves to, env-manipulation-free.
+        #[cfg(windows)]
+        let (env_removes, env_sets, cmd) = {
+            let trimmed = cmd.trim();
+            if let Some((inner_script, _)) = detect_bash_c_wrapper(trimmed) {
+                let (removes, sets, final_cmd) = parse_bash_env_script(inner_script);
+                let final_cmd = if final_cmd.is_empty() {
+                    cmd.to_string()
+                } else {
+                    resolve_unix_path(&final_cmd)
+                };
+                (removes, sets, final_cmd)
+            } else {
+                (Vec::new(), Vec::new(), resolve_unix_path(cmd))
+            }
+        };
+        #[cfg(not(windows))]
+        let (env_removes, env_sets, cmd) = (Vec::<String>::new(), Vec::<(String, String)>::new(), cmd.to_string());
+
         let shell = cached_shell().map(|s| s.to_string());
 
         match shell {
@@ -744,15 +893,17 @@ pub fn build_command(command: Option<&str>, env_shim: bool, allow_predictions: b
                 builder.env("TERM", "xterm-256color");
                 builder.env("COLORTERM", "truecolor");
                 builder.env("PSMUX_SESSION", "1");
+                for var in &env_removes { builder.env_remove(var); }
+                for (k, v) in &env_sets { builder.env(k, v); }
 
                 let stem = std::path::Path::new(&path).file_stem()
                     .and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
                 if stem == "pwsh" || stem == "powershell" {
-                    builder.args(["-NoLogo", "-Command", cmd]);
+                    builder.args(["-NoLogo", "-Command", &cmd]);
                 } else if matches!(stem.as_str(), "bash" | "sh" | "zsh" | "fish" | "dash" | "ash") {
-                    builder.args(["-c", cmd]);
+                    builder.args(["-c", &cmd]);
                 } else {
-                    builder.args(["/C", cmd]);
+                    builder.args(["/C", &cmd]);
                 }
                 builder
             }
@@ -762,7 +913,9 @@ pub fn build_command(command: Option<&str>, env_shim: bool, allow_predictions: b
                 builder.env("TERM", "xterm-256color");
                 builder.env("COLORTERM", "truecolor");
                 builder.env("PSMUX_SESSION", "1");
-                builder.args(["-NoLogo", "-Command", cmd]);
+                for var in &env_removes { builder.env_remove(var); }
+                for (k, v) in &env_sets { builder.env(k, v); }
+                builder.args(["-NoLogo", "-Command", &cmd]);
                 builder
             }
         }

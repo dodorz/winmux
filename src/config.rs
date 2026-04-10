@@ -887,18 +887,16 @@ pub fn parse_unbind_key(app: &mut AppState, line: &str) {
     
     let mut i = 1;
     let mut unbind_all = false;
-    let mut table_name: Option<&str> = None;
+    let mut table: Option<String> = None;
     
     while i < parts.len() {
         let p = parts[i];
         if p.starts_with('-') {
             if p.contains('a') { unbind_all = true; }
-            if p.contains('n') { table_name = Some("root"); }
-            if p.contains('T') {
+            if p.contains('n') { table = Some("root".to_string()); }
+            if p.contains('T') && i + 1 < parts.len() {
                 i += 1;
-                if i < parts.len() {
-                    table_name = Some(parts[i]);
-                }
+                table = Some(parts[i].to_string());
             }
             i += 1;
         } else {
@@ -907,11 +905,14 @@ pub fn parse_unbind_key(app: &mut AppState, line: &str) {
     }
     
     if unbind_all {
-        // Like tmux: default to "prefix" table when no -T specified
-        let target = table_name.unwrap_or("prefix");
-        app.key_tables.remove(target);
-        // Suppress hardcoded defaults when the prefix table is cleared
-        if target == "prefix" {
+        if let Some(t) = table {
+            // -a -T <table>: only clear that table
+            if let Some(binds) = app.key_tables.get_mut(&t) {
+                binds.clear();
+            }
+        } else {
+            // -a (no table): clear ALL tables + suppress defaults
+            app.key_tables.clear();
             app.defaults_suppressed = true;
         }
         return;

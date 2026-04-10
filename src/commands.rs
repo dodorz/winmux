@@ -1065,7 +1065,6 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             // Always apply locally first for immediate visual feedback,
             // then forward to server for authoritative state update.
             if let Some(path) = parts.get(1) {
-                app.defaults_suppressed = false;
                 crate::config::source_file(app, path);
             }
             if let Some(port) = app.control_port {
@@ -1217,8 +1216,8 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             app.mode = Mode::ClockMode;
         }
         "list-sessions" | "ls" => {
-            // Show sessions filtered by current namespace
-            let output = crate::session::list_session_names_ns(app.socket_name.as_deref()).join("\n") + "\n";
+            // Show all sessions from filesystem
+            let output = crate::session::list_session_names().join("\n") + "\n";
             show_output_popup(app, "list-sessions", output);
         }
         "list-keys" | "lsk" => {
