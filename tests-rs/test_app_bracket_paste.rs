@@ -134,3 +134,64 @@ fn consecutive_pastes() {
         _ => panic!("expected Paste"),
     }
 }
+
+#[test]
+fn timeout_flush_enters_post_flush_drain() {
+    // Simulate a paste where the close sequence is lost:
+    // open sequence arrives, text accumulated, then timeout fires.
+    // After timeout, the `~` from a stripped close sequence should
+    // NOT leak through as a visible character (issue #197).
+    let mut st = State::new();
+    // Feed the open sequence + paste content (no close sequence).
+    let _ = feed_str(&mut st, "\x1b[200~hello world");
+    assert!(matches!(st, State::Pasting { .. }));
+    // Simulate: wait for the paste timeout to expire.  We cannot
+    // easily wait 2 seconds in a unit test, so we manipulate the
+    // started timestamp.
+    if let State::Pasting { ref mut started, .. } = st {
+        *started = std::time::Instant::now() - std::time::Duration::from_secs(3);
+    }
+    let timeout_result = flush_timeout(&mut st);
+    match timeout_result {
+        TimeoutAction::FlushPaste(text) => {
+            assert_eq!(text, "hello world");
+        }
+        _ => panic!("expected FlushPaste after timeout"),
+    }
+    // State should be IdlePostFlush (drain mode), not plain Idle.
+    assert!(matches!(st, State::IdlePostFlush { .. }));
+    // A `~` arriving now should be absorbed (it is residue from the
+    // stripped close sequence \x1b[201~).
+    let action = feed(&mut st, mk(KeyCode::Char('~')));
+    assert!(matches!(action, Action::Consumed),
+        "tilde after paste flush should be absorbed, got {:?}", std::mem::discriminant(&action));
+    // A normal character should pass through and transition to Idle.
+    let action = feed(&mut st, mk(KeyCode::Char('a')));
+    assert!(matches!(action, Action::Forward(_)),
+        "normal char after drain should be forwarded");
+    assert!(matches!(st, State::Idle));
+}
+
+#[test]
+fn timeout_flush_from_match_close_absorbs_residue() {
+    // Close sequence partially matched, then timeout fires.
+    let mut st = State::new();
+    // Open + content + partial close: \x1b[20 (missing 1~)
+    let _ = feed_str(&mut st, "\x1b[200~data\x1b[20");
+    assert!(matches!(st, State::MatchClose { .. }));
+    // Expire the timeout
+    if let State::MatchClose { ref mut started, .. } = st {
+        *started = std::time::Instant::now() - std::time::Duration::from_secs(3);
+    }
+    let result = flush_timeout(&mut st);
+    match result {
+        TimeoutAction::FlushPaste(text) => assert_eq!(text, "data"),
+        _ => panic!("expected FlushPaste"),
+    }
+    assert!(matches!(st, State::IdlePostFlush { .. }));
+    // Remaining close chars should be absorbed
+    let a1 = feed(&mut st, mk(KeyCode::Char('1')));
+    assert!(matches!(a1, Action::Consumed));
+    let a2 = feed(&mut st, mk(KeyCode::Char('~')));
+    assert!(matches!(a2, Action::Consumed));
+}

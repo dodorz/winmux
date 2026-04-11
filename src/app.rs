@@ -54,6 +54,11 @@ mod bracket_paste_detect {
     pub enum State {
         /// Normal operation; watching for start of \e[200~.
         Idle,
+        /// Post-paste-flush drain: absorbs residual close-sequence
+        /// characters (especially `~`) for a short period after a paste
+        /// timeout flush.  Prevents the tilde from the stripped close
+        /// sequence leaking through as visible input (issue #197).
+        IdlePostFlush { deadline: Instant },
         /// Matching characters of the open sequence at index `idx`.
         MatchOpen { idx: usize, pending: Vec<KeyEvent>, started: Instant },
         /// Accumulating paste content between open and close sequences.
@@ -108,6 +113,12 @@ mod bracket_paste_detect {
                 return TimeoutAction::Replay(pending);
             }
         }
+        // Check if we're in IdlePostFlush and the deadline expired.
+        if let State::IdlePostFlush { deadline } = state {
+            if Instant::now() >= *deadline {
+                *state = State::Idle;
+            }
+        }
         // Check for stale paste: if we have been accumulating paste content
         // for longer than PASTE_TIMEOUT_MS, force-flush it as a Paste event
         // so the terminal does not hang forever.
@@ -118,7 +129,10 @@ mod bracket_paste_detect {
             _ => false,
         };
         if paste_expired {
-            let old = std::mem::replace(state, State::Idle);
+            // Transition to IdlePostFlush to absorb residual close-sequence
+            // characters (especially `~`) that may still be in-flight.
+            let drain_deadline = Instant::now() + std::time::Duration::from_millis(100);
+            let old = std::mem::replace(state, State::IdlePostFlush { deadline: drain_deadline });
             match old {
                 State::Pasting { buf, .. } if !buf.is_empty() => {
                     return TimeoutAction::FlushPaste(buf);
@@ -158,6 +172,27 @@ mod bracket_paste_detect {
                     }
                 }
                 Action::Forward(key)
+            }
+            State::IdlePostFlush { deadline } => {
+                // After a paste timeout flush, absorb residual close-sequence
+                // characters.  The most common residue is a lone `~` from
+                // \x1b[201~ when ConPTY strips the CSI prefix.  Also absorb
+                // `[`, digits, and ESC that could be fragments of the close
+                // sequence.  Once the deadline expires or a non-close-
+                // sequence character arrives, fall through to normal Idle.
+                if Instant::now() < deadline {
+                    if let Some(b) = key_byte(&key) {
+                        if b == b'~' || b == b'[' || b.is_ascii_digit() || b == 0x1b {
+                            // Absorb: likely part of the stripped close sequence.
+                            *state = State::IdlePostFlush { deadline };
+                            return Action::Consumed;
+                        }
+                    }
+                }
+                // Deadline expired or non-residue key: transition to Idle
+                // and process normally.
+                *state = State::Idle;
+                return feed(state, key);
             }
             State::MatchOpen { idx, mut pending, .. } => {
                 if let Some(b) = key_byte(&key) {

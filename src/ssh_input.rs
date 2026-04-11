@@ -393,6 +393,10 @@ enum PS {
     PasteEsc,   // received \x1b inside paste
     PasteBrk,   // received \x1b[ inside paste
     PasteNum,   // accumulating digits inside paste CSI
+    /// Post-paste-flush drain: absorbs residual close-sequence characters
+    /// (especially `~`) after a paste timeout flush.  Transitions to Ground
+    /// on the next non-residue character or timeout tick.
+    PasteDrain,
     Osc,        // inside \x1b] … waiting for ST (\x07 or \x1b\\)
     OscEsc,     // received \x1b inside OSC — might be ST
 }
@@ -418,6 +422,13 @@ struct VtParser {
     /// missing close sequence (`\x1b[201~`) and force-flush after a timeout
     /// so the terminal does not hang forever (issue #197).
     paste_start: Option<std::time::Instant>,
+    /// Set to `true` when the parser transitions into Paste state.
+    /// The reader thread checks this flag and re-verifies VTI (Virtual
+    /// Terminal Input mode) is still enabled.  ConPTY or other processes
+    /// can clear VTI, which causes the close sequence (`\x1b[201~`) to be
+    /// interpreted as a CSI sequence instead of passed through as raw
+    /// bytes, leading to a lost close marker and terminal hang.
+    needs_vti_recheck: bool,
     /// OSC sequence accumulator (e.g. for OSC 52 clipboard responses).
     osc: String,
     /// Pending high surrogate for UTF-16 decoding.
@@ -437,6 +448,7 @@ impl VtParser {
             x10_buf: [0; 3],
             paste: String::new(),
             paste_start: None,
+            needs_vti_recheck: false,
             osc: String::new(),
             hi_sur: None,
         }
@@ -465,6 +477,7 @@ impl VtParser {
             PS::PasteEsc => self.on_paste_esc(ch, emit),
             PS::PasteBrk => self.on_paste_brk(ch, emit),
             PS::PasteNum => self.on_paste_num(ch, emit),
+            PS::PasteDrain => self.on_paste_drain(ch, emit),
             PS::Osc      => self.on_osc(ch, emit),
             PS::OscEsc   => self.on_osc_esc(ch, emit),
         }
@@ -481,6 +494,11 @@ impl VtParser {
     fn flush_escape<F: FnMut(Event)>(&mut self, emit: &mut F) {
         if self.state == PS::Escape {
             emit(make_key(KeyCode::Esc, KeyModifiers::empty()));
+            self.state = PS::Ground;
+        }
+        // PasteDrain should also expire on timeout — if no residue
+        // characters arrived within one poll cycle, the drain is done.
+        if self.state == PS::PasteDrain {
             self.state = PS::Ground;
         }
     }
@@ -530,13 +548,55 @@ impl VtParser {
                 self.paste.len(),
                 self.state,
             ));
+            // Save current state before flushing to determine the correct
+            // transition for absorbing residual close-sequence characters.
+            let pre_flush_state = self.state;
             let text = std::mem::take(&mut self.paste);
             if !text.is_empty() {
                 emit(Event::Paste(text));
             }
             self.paste_start = None;
-            self.cur = 0;
-            self.state = PS::Ground;
+            // Transition to the appropriate state to absorb any remaining
+            // characters of the close sequence (\x1b[201~) that may still
+            // be in-flight.  Going directly to Ground would cause residual
+            // characters (especially the trailing '~') to leak as visible
+            // input (issue #197).
+            match pre_flush_state {
+                PS::Paste => {
+                    // Close sequence hasn't started arriving through the
+                    // VT parser.  However, ConPTY may have stripped the
+                    // CSI prefix (\x1b[201) and only leaked the final `~`.
+                    // Transition to PasteDrain to absorb that residue.
+                    self.cur = 0;
+                    self.state = PS::PasteDrain;
+                }
+                PS::PasteEsc => {
+                    // Already consumed \x1b.  Transition to Escape so the
+                    // remaining [201~ is processed as a normal CSI (which
+                    // dispatch_tilde discards for param 201).
+                    self.cur = 0;
+                    self.state = PS::Escape;
+                }
+                PS::PasteBrk => {
+                    // Consumed \x1b[.  Transition to CsiEntry.
+                    self.reset_csi();
+                    self.state = PS::CsiEntry;
+                }
+                PS::PasteNum => {
+                    // Consumed \x1b[ plus digits (cur holds accumulated
+                    // value).  Transition to CsiParam so the final ~
+                    // dispatches via dispatch_tilde (which ignores 201).
+                    let saved_cur = self.cur;
+                    self.reset_csi();
+                    self.cur = saved_cur;
+                    self.has_digit = true;
+                    self.state = PS::CsiParam;
+                }
+                _ => {
+                    self.cur = 0;
+                    self.state = PS::Ground;
+                }
+            }
         }
     }
 
@@ -708,6 +768,7 @@ impl VtParser {
         if ch == '~' && self.pidx >= 1 && self.params[0] == 200 {
             self.paste.clear();
             self.paste_start = Some(std::time::Instant::now());
+            self.needs_vti_recheck = true;
             self.state = PS::Paste;
             return;
         }
@@ -955,6 +1016,30 @@ impl VtParser {
             self.paste.push(ch);
             self.cur = 0;
             self.state = PS::Paste;
+        }
+    }
+
+    /// Post-paste-flush drain: absorbs residual close-sequence characters
+    /// (`~`, `[`, digits, ESC) that may arrive after a paste timeout flush.
+    /// ConPTY can strip the CSI prefix of `\x1b[201~` and leak only the
+    /// final `~`, which would otherwise appear as a visible character.
+    fn on_paste_drain<F: FnMut(Event)>(&mut self, ch: char, emit: &mut F) {
+        match ch {
+            '~' | '[' | '0'..='9' => {
+                // Likely residue from a stripped close sequence — absorb.
+                ssh_debug_log(&format!("PasteDrain: absorbing residue char {:?}", ch));
+            }
+            '\x1b' => {
+                // ESC could start a new close sequence that ConPTY partially
+                // passed through.  Transition to Escape to let the CSI
+                // parser handle it (dispatch_tilde ignores param 201).
+                self.state = PS::Escape;
+            }
+            _ => {
+                // Non-residue character: drain is done, process normally.
+                self.state = PS::Ground;
+                self.on_ground(ch, emit);
+            }
         }
     }
 
@@ -1461,15 +1546,36 @@ fn start_ssh_reader() -> io::Result<std::sync::mpsc::Receiver<Event>> {
                                 }
                             } else {
                                 key_vk_count += 1;
-                                parser.cancel_escape();
-
-                                let mods = vk_modifiers(key.control_key_state);
-                                if let Some(code) = vk_to_keycode(key.virtual_key_code) {
-                                    let evt = make_key(code, mods);
+                                // When the parser is inside a bracketed-paste
+                                // sequence, a VK_ESCAPE (u_char=0) must be fed
+                                // to the VT parser as '\x1b' so the close-
+                                // sequence detector can recognise \x1b[201~.
+                                // ConPTY may deliver the ESC from the paste
+                                // close marker as a VK event (bypassing the VT
+                                // parser), which would leave the parser stuck
+                                // in Paste state and cause the trailing '~' to
+                                // leak as a visible character (issue #197).
+                                if parser.is_in_paste() && key.virtual_key_code == 0x1B {
                                     if verbose {
-                                        ssh_debug_log(&format!("  → emit(vk): {:?}", evt));
+                                        ssh_debug_log("  VK_ESCAPE in paste state → feeding \\x1b to parser");
                                     }
-                                    if tx.send(evt).is_err() { alive = false; }
+                                    parser.feed('\x1b', &mut |evt| {
+                                        if verbose {
+                                            ssh_debug_log(&format!("  → emit(paste-esc): {:?}", evt));
+                                        }
+                                        if tx.send(evt).is_err() { alive = false; }
+                                    });
+                                } else {
+                                    parser.cancel_escape();
+
+                                    let mods = vk_modifiers(key.control_key_state);
+                                    if let Some(code) = vk_to_keycode(key.virtual_key_code) {
+                                        let evt = make_key(code, mods);
+                                        if verbose {
+                                            ssh_debug_log(&format!("  → emit(vk): {:?}", evt));
+                                        }
+                                        if tx.send(evt).is_err() { alive = false; }
+                                    }
                                 }
                             }
                         }
@@ -1514,6 +1620,23 @@ fn start_ssh_reader() -> io::Result<std::sync::mpsc::Receiver<Event>> {
                     }
                     // If WAIT_OBJECT_0 → more input arriving, continue loop
                     // and the escape will be resolved with the next batch.
+                }
+
+                // When the parser just entered Paste state, re-verify that
+                // VTI is still enabled.  ConPTY or other processes can clear
+                // it, which causes the close sequence (\x1b[201~) to be
+                // interpreted as a CSI sequence instead of passed through
+                // as raw bytes (issue #197).
+                if parser.needs_vti_recheck {
+                    parser.needs_vti_recheck = false;
+                    let mut cur_mode: u32 = 0;
+                    if unsafe { GetConsoleMode(handle, &mut cur_mode) } != 0 {
+                        if cur_mode & ENABLE_VIRTUAL_TERMINAL_INPUT == 0 {
+                            ssh_debug_log("VTI cleared at paste-start! Re-enabling...");
+                            let fixed = cur_mode | ENABLE_VIRTUAL_TERMINAL_INPUT | ENABLE_MOUSE_INPUT;
+                            unsafe { SetConsoleMode(handle, fixed) };
+                        }
+                    }
                 }
 
                 if !alive { break; }
