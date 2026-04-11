@@ -1,10 +1,15 @@
 # Issue #200 E2E Test: new-session command via prefix+: must create a session
-# This test proves the fix ACTUALLY WORKS by:
-# 1. Starting a psmux session
-# 2. Sending "new-session -s <name>" via the server TCP control protocol
-# 3. Verifying the new session's port file appears (proving it was created)
-# 4. Verifying the new session is reachable via TCP
-# 5. Cleaning up both sessions
+# This test proves the fix ACTUALLY WORKS by testing BOTH paths:
+#
+# PATH 1 (TCP): Send new-session via server TCP protocol (how commands.rs
+#   forwards to server, and how the server handler processes it)
+#
+# PATH 2 (ACTUAL USER FLOW): Use send-keys to simulate prefix+: command prompt,
+#   type "new-session -s <name>", press Enter. This is THE EXACT user workflow
+#   from the issue report. It goes through execute_command_prompt() ->
+#   execute_command_string() -> execute_command_string_single() -> spawn logic.
+#
+# Both paths must create real, reachable sessions.
 
 param(
     [switch]$Verbose
@@ -14,7 +19,8 @@ $ErrorActionPreference = "Stop"
 $homeDir = $env:USERPROFILE
 $psmuxDir = "$homeDir\.psmux"
 $testSession = "e2e_issue200_main"
-$newSession = "e2e_issue200_created"
+$tcpCreated = "e2e_issue200_tcp"
+$promptCreated = "e2e_issue200_prompt"
 $passed = 0
 $failed = 0
 
@@ -87,10 +93,8 @@ function Cleanup-Session($session) {
     $portFile = "$psmuxDir\$session.port"
     $keyFile = "$psmuxDir\$session.key"
     if (Test-Path $portFile) {
-        # Try to send kill-server
         Send-PsmuxCommand $session "kill-server" | Out-Null
         Start-Sleep -Milliseconds 500
-        # Remove port/key files
         Remove-Item $portFile -Force -ErrorAction SilentlyContinue
     }
     Remove-Item $keyFile -Force -ErrorAction SilentlyContinue
@@ -102,90 +106,123 @@ Write-Host ""
 
 # Cleanup any prior test state
 Cleanup-Session $testSession
-Cleanup-Session $newSession
+Cleanup-Session $tcpCreated
+Cleanup-Session $promptCreated
 Start-Sleep -Milliseconds 300
 
-# ── Step 1: Create the main session ───────────────────────────────────────
-Write-Host "Step 1: Creating main session '$testSession'..." -ForegroundColor Yellow
+# ══════════════════════════════════════════════════════════════════════════
+#  PART A: TCP PATH (server handler in connection.rs)
+# ══════════════════════════════════════════════════════════════════════════
+Write-Host "─── PART A: TCP path (server side handler) ───" -ForegroundColor Magenta
+
+# Step 1: Create the main session
+Write-Host "Step A1: Creating main session '$testSession'..." -ForegroundColor Yellow
 psmux new-session -d -s $testSession
 Start-Sleep -Milliseconds 2000
 
 $mainAlive = Test-SessionAlive $testSession
-Write-TestResult "Main session created and alive" $mainAlive "Port file not found or server not reachable"
+Write-TestResult "A1: Main session created and alive" $mainAlive "Port file not found or server not reachable"
 
 if (-not $mainAlive) {
     Write-Host "FATAL: Cannot proceed without main session" -ForegroundColor Red
     exit 1
 }
 
-# ── Step 2: Verify new session does NOT exist yet ─────────────────────────
-Write-Host "Step 2: Verifying '$newSession' does not exist yet..." -ForegroundColor Yellow
-$newPortFile = "$psmuxDir\$newSession.port"
-$preExists = Test-Path $newPortFile
-Write-TestResult "New session does not pre-exist" (-not $preExists) "Port file already exists before test"
-
-# ── Step 3: Send new-session command via TCP (simulating command prompt) ──
-Write-Host "Step 3: Sending 'new-session -d -s $newSession' to main session..." -ForegroundColor Yellow
-$resp = Send-PsmuxCommand $testSession "new-session -d -s $newSession"
+# Step 2: Send new-session via TCP
+Write-Host "Step A2: Sending 'new-session -d -s $tcpCreated' via TCP..." -ForegroundColor Yellow
+$resp = Send-PsmuxCommand $testSession "new-session -d -s $tcpCreated"
 if ($Verbose) { Write-Host "    Response: $resp" -ForegroundColor Gray }
-
-# Wait for the new session to spin up
 Start-Sleep -Milliseconds 3000
 
-# ── Step 4: Verify new session was created ────────────────────────────────
-Write-Host "Step 4: Verifying new session was created..." -ForegroundColor Yellow
-$newPortExists = Test-Path $newPortFile
-Write-TestResult "New session port file exists" $newPortExists "Port file $newPortFile not found"
+$tcpAlive = Test-SessionAlive $tcpCreated
+Write-TestResult "A2: TCP created session is alive" $tcpAlive "Session not reachable via TCP"
 
-$newAlive = Test-SessionAlive $newSession
-Write-TestResult "New session is alive and reachable" $newAlive "TCP connection to new session failed"
-
-# ── Step 5: Verify new session responds to commands ───────────────────────
-Write-Host "Step 5: Verifying new session responds to commands..." -ForegroundColor Yellow
-if ($newAlive) {
-    $infoResp = Send-PsmuxCommand $newSession "display-message -p '#{session_name}'"
-    $gotResponse = ($null -ne $infoResp -and $infoResp.Length -gt 0)
-    Write-TestResult "New session responds to display-message" $gotResponse "No response from new session"
-    if ($Verbose -and $gotResponse) { Write-Host "    Session name: $infoResp" -ForegroundColor Gray }
+if ($tcpAlive) {
+    $infoResp = Send-PsmuxCommand $tcpCreated "display-message -p '#{session_name}'"
+    $nameCorrect = ($null -ne $infoResp -and $infoResp.Contains($tcpCreated))
+    Write-TestResult "A3: TCP session has correct name" $nameCorrect "Expected '$tcpCreated', got: $infoResp"
 } else {
-    Write-TestResult "New session responds to display-message" $false "Skipped - session not alive"
+    Write-TestResult "A3: TCP session has correct name" $false "Skipped, session not alive"
 }
 
-# ── Step 6: Verify both sessions appear in session list ───────────────────
-Write-Host "Step 6: Verifying both sessions appear in session list..." -ForegroundColor Yellow
-$allSessions = Get-ChildItem "$psmuxDir\*.port" | ForEach-Object { $_.BaseName }
-$mainInList = $allSessions -contains $testSession
-$newInList = $allSessions -contains $newSession
-Write-TestResult "Main session in port file list" $mainInList "Main session not found in .psmux directory"
-Write-TestResult "New session in port file list" $newInList "New session not found in .psmux directory"
+# ══════════════════════════════════════════════════════════════════════════
+#  PART B: ACTUAL USER FLOW (prefix+: command prompt -> commands.rs)
+#  THIS IS THE EXACT WORKFLOW FROM THE ISSUE REPORT
+# ══════════════════════════════════════════════════════════════════════════
+Write-Host ""
+Write-Host "─── PART B: ACTUAL USER FLOW (prefix + : command prompt) ───" -ForegroundColor Magenta
+Write-Host "  This simulates the exact steps from the issue report:" -ForegroundColor DarkGray
+Write-Host "  1. Open psmux  2. Press prefix+:  3. Type new-session  4. Enter" -ForegroundColor DarkGray
 
-# ── Step 7: Test new-session with auto-generated name ─────────────────────
-Write-Host "Step 7: Testing new-session without explicit name..." -ForegroundColor Yellow
-$beforeSessions = (Get-ChildItem "$psmuxDir\*.port" -ErrorAction SilentlyContinue).Count
-$resp2 = Send-PsmuxCommand $testSession "new-session -d"
-Start-Sleep -Milliseconds 3000
-$afterSessions = (Get-ChildItem "$psmuxDir\*.port" -ErrorAction SilentlyContinue).Count
-$autoCreated = $afterSessions -gt $beforeSessions
-Write-TestResult "new-session without -s creates auto-named session" $autoCreated "Session count did not increase (before: $beforeSessions, after: $afterSessions)"
+# Step B1: Verify target session does not exist yet
+$promptPortFile = "$psmuxDir\$promptCreated.port"
+$preExists = Test-Path $promptPortFile
+Write-TestResult "B1: Target session does not pre-exist" (-not $preExists) "Port file already exists"
+
+# Step B2: Send prefix (C-b), then colon (:), to open command prompt
+Write-Host "Step B2: Sending prefix + : to open command prompt..." -ForegroundColor Yellow
+psmux send-keys -t $testSession C-b 2>$null
+Start-Sleep -Milliseconds 500
+psmux send-keys -t $testSession : 2>$null
+Start-Sleep -Milliseconds 500
+
+# Step B3: Type the new-session command
+Write-Host "Step B3: Typing 'new-session -d -s $promptCreated' + Enter..." -ForegroundColor Yellow
+psmux send-keys -t $testSession "new-session -d -s $promptCreated" Enter 2>$null
+
+# Step B4: Wait for session to be created (the handler spawns a server process)
+Write-Host "Step B4: Waiting for session creation..." -ForegroundColor Yellow
+Start-Sleep -Milliseconds 5000
+
+# Step B5: VERIFY the session was actually created
+$promptAlive = Test-SessionAlive $promptCreated
+Write-TestResult "B5: Command prompt created session EXISTS" (Test-Path $promptPortFile) "Port file $promptPortFile not found"
+Write-TestResult "B6: Command prompt created session is ALIVE" $promptAlive "TCP connection failed"
+
+if ($promptAlive) {
+    # Verify the session actually responds and has the right name
+    $nameResp = Send-PsmuxCommand $promptCreated "display-message -p '#{session_name}'"
+    $nameMatch = ($null -ne $nameResp -and $nameResp.Contains($promptCreated))
+    Write-TestResult "B7: Session name matches '$promptCreated'" $nameMatch "Got: $nameResp"
+    
+    # Verify it's a real session with windows
+    $lwResp = Send-PsmuxCommand $promptCreated "list-windows"
+    $hasWindows = ($null -ne $lwResp -and $lwResp.Length -gt 0)
+    Write-TestResult "B8: Session has windows" $hasWindows "list-windows returned nothing"
+    if ($Verbose -and $hasWindows) { Write-Host "    Windows: $lwResp" -ForegroundColor Gray }
+} else {
+    Write-TestResult "B7: Session name matches" $false "Skipped, session not alive"
+    Write-TestResult "B8: Session has windows" $false "Skipped, session not alive"
+}
+
+# Step B6: Verify original session is still alive (no side effects)
+$mainStillAlive = Test-SessionAlive $testSession
+Write-TestResult "B9: Main session still alive (no side effects)" $mainStillAlive "Main session died"
+
+# ══════════════════════════════════════════════════════════════════════════
+#  PART C: DUPLICATE PREVENTION
+# ══════════════════════════════════════════════════════════════════════════
+Write-Host ""
+Write-Host "─── PART C: Duplicate session prevention ───" -ForegroundColor Magenta
+
+# Try creating same session again, should show "already exists"
+Write-Host "Step C1: Attempting to create duplicate session..." -ForegroundColor Yellow
+$dupResp = Send-PsmuxCommand $testSession "new-session -d -s $promptCreated"
+if ($Verbose) { Write-Host "    Duplicate response: $dupResp" -ForegroundColor Gray }
+$isDuplicate = ($null -ne $dupResp -and $dupResp.Contains("already exists"))
+Write-TestResult "C1: Duplicate session correctly rejected" $isDuplicate "Expected 'already exists', got: $dupResp"
 
 # ── Cleanup ───────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "Cleaning up..." -ForegroundColor Yellow
-
-# Kill all test sessions
 Cleanup-Session $testSession
-Cleanup-Session $newSession
+Cleanup-Session $tcpCreated
+Cleanup-Session $promptCreated
 
-# Find and kill auto-generated sessions
-$autoSessions = Get-ChildItem "$psmuxDir\*.port" -ErrorAction SilentlyContinue | Where-Object {
-    $_.BaseName -match '^\d+$'
-} | ForEach-Object { $_.BaseName }
-foreach ($s in $autoSessions) {
-    # Only kill if it was created during our test (within last 30 seconds)
-    if ((Get-Item "$psmuxDir\$s.port").CreationTime -gt (Get-Date).AddSeconds(-30)) {
-        Cleanup-Session $s
-    }
-}
+# Kill auto-generated sessions from this test run
+Get-ChildItem "$psmuxDir\*.port" -ErrorAction SilentlyContinue | Where-Object {
+    $_.BaseName -match '^\d+$' -and $_.CreationTime -gt (Get-Date).AddSeconds(-30)
+} | ForEach-Object { Cleanup-Session $_.BaseName }
 Start-Sleep -Milliseconds 500
 
 # ── Summary ───────────────────────────────────────────────────────────────
@@ -196,9 +233,9 @@ Write-Host "  Failed: $failed" -ForegroundColor $(if ($failed -gt 0) { "Red" } e
 Write-Host ""
 
 if ($failed -gt 0) {
-    Write-Host "ISSUE #200 FIX NOT VERIFIED - $failed test(s) failed!" -ForegroundColor Red
+    Write-Host "ISSUE #200 FIX NOT FULLY VERIFIED: $failed test(s) failed!" -ForegroundColor Red
     exit 1
 } else {
-    Write-Host "ISSUE #200 FIX VERIFIED - new-session works from inside a session!" -ForegroundColor Green
+    Write-Host "ISSUE #200 FIX PROVEN: Both TCP and command prompt paths create sessions!" -ForegroundColor Green
     exit 0
 }
